@@ -1,0 +1,171 @@
+population_proportions:
+  salaried: 0.49
+  small_business: 0.33
+  student: 0.05
+  retiree: 0.07
+  big_business: 0.06
+
+salaried:
+  name: salaried
+  operation_mix:
+    retrait: 0.50
+    versement: 0.05
+    virement: 0.40
+    cheque: 0.05
+  frequency_mean:
+    retrait: 3
+    versement: 0.33
+    virement: 2
+    cheque: 0.33
+  frequency_std:
+    retrait: 1
+    versement: 0.3
+    virement: 1
+    cheque: 0.3
+  timing:
+    day_of_month_mean: 3
+    day_of_month_std: 2
+  amount_mean:
+    retrait: 300
+    versement: 200
+    virement: 450
+    cheque: 500
+  amount_std:
+    retrait: 150
+    versement: 100
+    virement: 200
+    cheque: 200
+  counterparty: 0.85
+  branch_loyalty: 0.90
+
+small_business:
+  name: small_business
+  operation_mix:
+    retrait: 0.15
+    versement: 0.55
+    virement: 0.25
+    cheque: 0.05
+  frequency_mean:
+    retrait: 6
+    versement: 22
+    virement: 8
+    cheque: 1.5
+  frequency_std:
+    retrait: 2
+    versement: 5
+    virement: 3
+    cheque: 1
+  timing:
+    day_of_month_mean: 15
+    day_of_month_std: 10
+  amount_mean:
+    retrait: 500
+    versement: 800
+    virement: 1500
+    cheque: 2000
+  amount_std:
+    retrait: 200
+    versement: 400
+    virement: 700
+    cheque: 1000
+  counterparty: 0.60
+  branch_loyalty: 0.65
+
+student:
+  name: student
+  operation_mix:
+    retrait: 0.95
+    versement: 0.02
+    virement: 0.03
+    cheque: 0.0
+  frequency_mean:
+    retrait: 7
+    versement: 0.1
+    virement: 0.1
+    cheque: 0
+  frequency_std:
+    retrait: 2
+    versement: 0.1
+    virement: 0.1
+    cheque: 0
+  timing:
+    day_of_month_mean: 15
+    day_of_month_std: 10
+  amount_mean:
+    retrait: 40
+    versement: 50
+    virement: 50
+    cheque: 0
+  amount_std:
+    retrait: 20
+    versement: 30
+    virement: 30
+    cheque: 0
+  counterparty: 0.95
+  branch_loyalty: 0.85
+
+retiree:
+  name: retiree
+  operation_mix:
+    retrait: 0.50
+    versement: 0.03
+    virement: 0.45
+    cheque: 0.02
+  frequency_mean:
+    retrait: 1.5
+    versement: 0.1
+    virement: 1.5
+    cheque: 0.1
+  frequency_std:
+    retrait: 0.5
+    versement: 0.1
+    virement: 0.5
+    cheque: 0.1
+  timing:
+    day_of_month_mean: 3
+    day_of_month_std: 1
+  amount_mean:
+    retrait: 400
+    versement: 100
+    virement: 300
+    cheque: 200
+  amount_std:
+    retrait: 150
+    versement: 50
+    virement: 100
+    cheque: 100
+  counterparty: 0.95
+  branch_loyalty: 0.95
+
+big_business:
+  name: big_business
+  operation_mix:
+    retrait: 0.02
+    versement: 0.15
+    virement: 0.78
+    cheque: 0.05
+  frequency_mean:
+    retrait: 1
+    versement: 9
+    virement: 50
+    cheque: 3
+  frequency_std:
+    retrait: 1
+    versement: 3
+    virement: 15
+    cheque: 1.5
+  timing:
+    day_of_month_mean: 25
+    day_of_month_std: 8
+  amount_mean:
+    retrait: 2000
+    versement: 5000
+    virement: 15000
+    cheque: 20000
+  amount_std:
+    retrait: 1000
+    versement: 3000
+    virement: 10000
+    cheque: 10000
+  counterparty: 0.50
+  branch_loyalty: 0.40
