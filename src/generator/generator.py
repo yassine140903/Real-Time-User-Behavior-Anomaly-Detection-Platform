@@ -28,7 +28,17 @@ class Generator:
         self.branch_pool = [f"BR-{str(i).zfill(3)}" for i in range(1, num_branches + 1)]
         
         # Create employee pool (roughly 2 per branch)
-        self.employee_pool = [f"EMP-{str(i).zfill(4)}" for i in range(1, num_branches * 2 + 1)]
+        self.employee_pool = []
+        self.branch_employees = {}  # branch_id -> [employee_ids]
+        emp_counter = 1
+        for branch_id in self.branch_pool:
+            branch_emps = []
+            for _ in range(2):
+                emp_id = f"EMP-{str(emp_counter).zfill(4)}"
+                self.employee_pool.append({"employee_id": emp_id, "branch_id": branch_id})
+                branch_emps.append(emp_id)
+                emp_counter += 1
+            self.branch_employees[branch_id] = branch_emps
         
         # Phase 1: Planning
         self.clients = self._create_population(num_clients)
@@ -188,7 +198,7 @@ class Generator:
             branch = np.random.choice(self.branch_pool)
         
         # Pick employee from that branch (simplified)
-        employee = np.random.choice(self.employee_pool)
+        employee = np.random.choice(self.branch_employees[branch])
         
         # Counterparty
         if op_type in ["virement", "cheque"]:
@@ -281,3 +291,52 @@ class Generator:
             writer.writerows(events)
         
         print(f"Exported {len(events)} events to {output_path}")
+
+
+    def export_clients(self, output_path="data/clients_master.csv"):
+        columns = [
+                "client_id", "archetype", "account_opening_date",
+                "nationality", "client_type", "home_branch_id",
+            ]
+        with open(output_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                for client in self.clients:
+                    writer.writerow({
+                        "client_id": client.client_id,
+                        "archetype": client.archetype.name,
+                        "account_opening_date": client.account_opening_date.isoformat(),
+                        "nationality": "TN",
+                        "client_type": client.client_type,
+                        "home_branch_id": client.home_branch,
+                    })
+        print(f"Exported {len(self.clients)} clients to {output_path}")
+
+    def export_accounts(self, output_path="data/accounts.csv"):
+            ACCOUNT_TYPE_MAP = {
+                "salaried": "courant", "student": "courant",
+                "retiree": "courant", "small_business": "commercial",
+                "big_business": "commercial",
+            }
+            columns = ["account_id", "client_id", "account_type", "opening_date", "status"]
+            with open(output_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                for client in self.clients:
+                    writer.writerow({
+                        "account_id": client.account_id,
+                        "client_id": client.client_id,
+                        "account_type": ACCOUNT_TYPE_MAP[client.archetype.name],
+                        "opening_date": client.account_opening_date.isoformat(),
+                        "status": "active",
+                    })
+            print(f"Exported {len(self.clients)} accounts to {output_path}")
+
+    def export_employees(self, output_path="data/employees_master.csv"):
+            columns = ["employee_id", "branch_id"]
+            with open(output_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                for emp in self.employee_pool:
+                    writer.writerow(emp)
+            print(f"Exported {len(self.employee_pool)} employees to {output_path}")

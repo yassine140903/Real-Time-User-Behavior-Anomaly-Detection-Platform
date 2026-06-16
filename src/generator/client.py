@@ -1,5 +1,23 @@
 import numpy as np
 import uuid
+import datetime
+
+ACCOUNT_AGE_RANGES = {
+    "salaried":       (2, 15),
+    "student":        (1, 3),
+    "retiree":        (10, 30),
+    "small_business":  (1, 10),
+    "big_business":    (5, 20),
+}
+
+CLIENT_TYPE_MAP = {
+    "salaried":      "personne_physique",
+    "student":       "personne_physique",
+    "retiree":       "personne_physique",
+    "small_business": "personne_morale",
+    "big_business":   "personne_morale",
+}
+
 
 class Client:
     def __init__(self, archetype, branch_pool):
@@ -54,3 +72,12 @@ class Client:
         # Assign home branch
         self.home_branch = np.random.choice(branch_pool)
         self.branch_pool = branch_pool
+
+        # Regulatory client type — static from archetype, not sampled
+        self.client_type = CLIENT_TYPE_MAP[archetype.name]
+
+        # Account opening date — older for retirees, newer for students
+        sim_start = datetime.date(2025, 1, 1)
+        min_years, max_years = ACCOUNT_AGE_RANGES.get(archetype.name, (1, 10))
+        age_days = np.random.randint(min_years * 365, max_years * 365)
+        self.account_opening_date = sim_start - datetime.timedelta(days=age_days)

@@ -14,3 +14,6 @@ gen = Generator(
 
 events = gen.generate(start_date="2025-01-01")
 gen.export_csv(events, output_path=str(OUTPUT_PATH))
+gen.export_clients(output_path=str(PROJECT_ROOT / "data" / "clients_master.csv"))
+gen.export_accounts(output_path=str(PROJECT_ROOT / "data" / "accounts.csv"))
+gen.export_employees(output_path=str(PROJECT_ROOT / "data" / "employees_master.csv"))
