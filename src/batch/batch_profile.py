@@ -11,7 +11,7 @@ DB_CONFIG = {
     "port": 5432,
     "dbname": "amen_anomaly",
     "user": "postgres",
-    "password": "9011361923257228",
+    "password": "pwd",
 }
 
 # Reference point for window calculations.

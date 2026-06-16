@@ -3,7 +3,7 @@ import json
 
 conn = psycopg2.connect(
     host="localhost", port=5432, dbname="amen_anomaly",
-    user="postgres", password="9011361923257228"
+    user="postgres", password="pwd"
 )
 cur = conn.cursor()
 
