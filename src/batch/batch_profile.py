@@ -14,10 +14,10 @@ DB_CONFIG = {
     "password": "pwd",
 }
 
-# Reference point for window calculations.
-# In production this would be datetime.now().
-# For our simulation (180 days from 2025-01-01) we use the last day.
-REFERENCE_DATE = datetime(2025, 6, 29)
+
+
+SIM_START = datetime(2025, 1, 1)
+SIM_END = datetime(2025, 6, 29)
 
 WINDOWS = {
     "24h": timedelta(hours=24),
@@ -73,6 +73,21 @@ def compute_transaction_stats(client_txs, ref_date):
                 stats[f"{prefix}_max"] = round(float(amounts.max()), 2)
     
     return stats
+
+def generate_weekly_dates(start, end):
+    """
+    Generate weekly reference dates from (start + 7 days) through end.
+    Always includes the final simulation date even if it doesn't
+    fall exactly on a 7-day boundary.
+    """
+    dates = []
+    current = start + timedelta(days=7)
+    while current <= end:
+        dates.append(current)
+        current += timedelta(days=7)
+    if dates[-1] != end:
+        dates.append(end)
+    return dates
 
 
 def compute_behavioral_patterns(client_txs, ref_date):
@@ -240,43 +255,53 @@ def run_batch(conn):
     print("Fetching transactions...")
     tx_df = fetch_all_transactions(conn)
     print(f"Loaded {len(tx_df)} transactions")
-    
-    # Fetch client master data
-    clients_df = pd.read_sql("SELECT * FROM clients_master", conn, 
+
+    clients_df = pd.read_sql("SELECT * FROM clients_master", conn,
                               parse_dates=["account_opening_date"])
     print(f"Loaded {len(clients_df)} clients")
-    
-    # Group transactions by client
+
+    # Group ONCE — reused for every weekly snapshot
     grouped = tx_df.groupby("client_id")
-    
-    profiles = []
-    for _, client_row in clients_df.iterrows():
-        cid = client_row["client_id"]
-        
-        # Get this client's transactions (empty DataFrame if none)
-        if cid in grouped.groups:
-            client_txs = grouped.get_group(cid)
-        else:
-            client_txs = tx_df.iloc[0:0]  # empty with same columns
-        
-        profile = compute_client_profile(
-            cid, client_txs, client_row, REFERENCE_DATE
+
+    weekly_dates = generate_weekly_dates(SIM_START, SIM_END)
+    print(f"Computing profiles for {len(weekly_dates)} weekly snapshots...")
+
+    total_written = 0
+
+    for i, ref_date in enumerate(weekly_dates, 1):
+        snapshot_profiles = []
+
+        for _, client_row in clients_df.iterrows():
+            cid = client_row["client_id"]
+
+            if cid in grouped.groups:
+                all_client_txs = grouped.get_group(cid)
+                # Only transactions up to this reference date
+                client_txs = all_client_txs[all_client_txs["timestamp"] <= ref_date]
+            else:
+                client_txs = tx_df.iloc[0:0]  # empty with same columns
+
+            profile = compute_client_profile(
+                cid, client_txs, client_row, ref_date
+            )
+
+            snapshot_profiles.append((str(cid), ref_date, json.dumps(profile)))
+
+        # Bulk insert this week's profiles
+        cur = conn.cursor()
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO profile_snapshots (client_id, computed_at, profile_data) VALUES %s",
+            snapshot_profiles,
+            template="(%s, %s, %s::jsonb)"
         )
-        
-        profiles.append((str(cid), REFERENCE_DATE, json.dumps(profile)))
-    
-    # Bulk insert into profile_snapshots
-    print(f"Writing {len(profiles)} profiles...")
-    cur = conn.cursor()
-    psycopg2.extras.execute_values(
-        cur,
-        "INSERT INTO profile_snapshots (client_id, computed_at, profile_data) VALUES %s",
-        profiles,
-        template="(%s, %s, %s::jsonb)"
-    )
-    conn.commit()
-    cur.close()
-    print("Done.")
+        conn.commit()
+        cur.close()
+
+        total_written += len(snapshot_profiles)
+        print(f"  [{i}/{len(weekly_dates)}] {ref_date.date()}: {len(snapshot_profiles)} profiles")
+
+    print(f"Done — {total_written} total profile snapshots written.")
 
 
 if __name__ == "__main__":
