@@ -1,342 +1,403 @@
 import numpy as np
 import uuid
-from .archetype import Archetype, load_archetypes
-from .client import Client
 import datetime
 import json
-import calendar
 import csv
+import calendar
+from .archetype import load_archetypes
+from .client import Client
+
 
 class Generator:
-    def __init__(self, config_path="config/archetypes.yaml", 
-                 num_clients=1000, 
-                 num_branches=150,
-                 anomaly_rate=0.0013,
-                 difficulty_distribution=None,
-                 sim_days=180):
-        
+    def __init__(self, config_path="config/archetype.yaml",
+                 num_clients=1000, num_branches=150,
+                 anomaly_rate=0.0013, sim_days=180):
+
         self.sim_days = sim_days
         self.anomaly_rate = anomaly_rate
-        self.difficulty_distribution = difficulty_distribution or {
-            "easy": 0.10, "medium": 0.30, "hard": 0.60
-        }
-        
-        # Load archetypes from config
+
         self.archetypes, self.proportions = load_archetypes(config_path)
-        
-        # Create branch pool
         self.branch_pool = [f"BR-{str(i).zfill(3)}" for i in range(1, num_branches + 1)]
-        
-        # Create employee pool (roughly 2 per branch)
-        self.employee_pool = []
-        self.branch_employees = {}  # branch_id -> [employee_ids]
-        emp_counter = 1
-        for branch_id in self.branch_pool:
-            branch_emps = []
-            for _ in range(2):
-                emp_id = f"EMP-{str(emp_counter).zfill(4)}"
-                self.employee_pool.append({"employee_id": emp_id, "branch_id": branch_id})
-                branch_emps.append(emp_id)
-                emp_counter += 1
-            self.branch_employees[branch_id] = branch_emps
-        
-        # Phase 1: Planning
+        self.employee_pool = [f"EMP-{str(i).zfill(4)}" for i in range(1, num_branches * 2 + 1)]
+
         self.clients = self._create_population(num_clients)
+        self.client_lookup = {c.client_id: c for c in self.clients}
         self.anomaly_plan = self._plan_anomalies()
-    
+
+    # ------------------------------------------------------------------
+    # Population
+    # ------------------------------------------------------------------
     def _create_population(self, num_clients):
         clients = []
-        for archetype_name, proportion in self.proportions.items():
+        for arch_name, proportion in self.proportions.items():
             count = int(num_clients * proportion)
-            archetype = self.archetypes[archetype_name]
+            archetype = self.archetypes[arch_name]
             for _ in range(count):
                 clients.append(Client(archetype, self.branch_pool))
         return clients
-    
+
+    # ------------------------------------------------------------------
+    # Anomaly planning
+    # ------------------------------------------------------------------
     def _plan_anomalies(self):
         plan = []
-        
-        # Estimate total events across simulation
+
         total_events = sum(
             sum(c.frequency.values()) * self.sim_days / 30
             for c in self.clients
         )
-        
-        num_anomalous_events = int(total_events * self.anomaly_rate)
-        
-        # Average daily events per client
-        avg_daily_per_client = total_events / self.sim_days / len(self.clients)
-        
-        scenarios = {
-            "easy": [
-                {"name": "amount_spike", "actor": "client"},
-                {"name": "round_amount", "actor": "client"},
-                {"name": "duplicate_virement", "actor": "client"},
-                {"name": "volume_spike", "actor": "employee"},
-            ],
-            "medium": [
-                {"name": "frequency_burst", "actor": "client"},
-                {"name": "cumulative_threshold", "actor": "client"},
-                {"name": "timing_anomaly", "actor": "client"},
-                {"name": "client_concentration", "actor": "employee"},
-            ],
-            "hard": [
-                {"name": "smurfing", "actor": "client"},
-                {"name": "cheque_structuring", "actor": "client"},
-                {"name": "money_mule", "actor": "client"},
-                {"name": "behavioral_drift", "actor": "client"},
-                {"name": "cross_actor", "actor": "cross"},
-            ],
-        }
-        
-        durations = {"easy": 1, "medium": 5, "hard": 21}
-        
-        for difficulty, share in self.difficulty_distribution.items():
-            target_events = int(num_anomalous_events * share)
-            duration = durations[difficulty]
-            
-            # How many anomalous events one plan entry produces
-            events_per_entry = max(1, duration * avg_daily_per_client)
-            
-            # How many plan entries we actually need
-            n_entries = max(1, int(target_events / events_per_entry))
-            
-            available_scenarios = scenarios[difficulty]
-            
-            for _ in range(n_entries):
-                scenario = np.random.choice(available_scenarios)
-                client = np.random.choice(self.clients)
-                start_day = np.random.randint(14, self.sim_days - 14)
-                
+        num_anomalous = int(total_events * self.anomaly_rate)
+
+        scenarios = [
+            # Easy (10%) — single-event, single-dimension
+            {"name": "amount_spike",       "difficulty": "easy",   "duration": 1},
+            {"name": "round_amount",       "difficulty": "easy",   "duration": 1},
+            {"name": "duplicate_virement", "difficulty": "easy",   "duration": 1},
+            # Medium (30%) — short-term multi-event
+            {"name": "timing_anomaly",         "difficulty": "medium", "duration": 3},
+            {"name": "frequency_burst",        "difficulty": "medium", "duration": 3},
+            {"name": "cumulative_threshold",   "difficulty": "medium", "duration": 1},
+            # Hard (60%) — sustained coordinated patterns
+            {"name": "smurfing",                  "difficulty": "hard", "duration": 7},
+            {"name": "cheque_structuring",        "difficulty": "hard", "duration": 7},
+            {"name": "repeated_client_employee",  "difficulty": "hard", "duration": 1},
+        ]
+
+        difficulty_share = {"easy": 0.10, "medium": 0.30, "hard": 0.60}
+
+        # Rough events-per-entry for budget tracking
+        def _est_events(s):
+            if s["name"] == "frequency_burst":
+                return 15  # ~5x normal over 3 days
+            elif s["name"] in ("smurfing", "cheque_structuring"):
+                return s["duration"] * 2
+            elif s["name"] == "cumulative_threshold":
+                return 4
+            elif s["name"] == "repeated_client_employee":
+                return 6
+            elif s["name"] == "duplicate_virement":
+                return 2
+            return 1
+
+        for difficulty, share in difficulty_share.items():
+            target = int(num_anomalous * share)
+            pool = [s for s in scenarios if s["difficulty"] == difficulty]
+            generated = 0
+
+            while generated < target:
+                scenario = pool[np.random.randint(len(pool))]
+                client = self.clients[np.random.randint(len(self.clients))]
+                start_day = np.random.randint(21, self.sim_days - 14)
+
                 plan.append({
                     "client_id": client.client_id,
                     "scenario": scenario["name"],
-                    "actor": scenario["actor"],
                     "difficulty": difficulty,
                     "start_day": start_day,
-                    "end_day": start_day + duration,
+                    "end_day": start_day + scenario["duration"] - 1,
                 })
-        
-        return plan
-    
+                generated += _est_events(scenario)
 
+        return plan
+
+    # ------------------------------------------------------------------
+    # Main generation loop
+    # ------------------------------------------------------------------
     def generate(self, start_date="2025-01-01"):
         events = []
         start = datetime.date.fromisoformat(start_date)
-        
-        # Build a lookup for quick anomaly checking
+
+        # Build lookup: client_id -> list of plan entries
         anomaly_lookup = {}
         for entry in self.anomaly_plan:
-            cid = entry["client_id"]
-            if cid not in anomaly_lookup:
-                anomaly_lookup[cid] = []
-            anomaly_lookup[cid].append(entry)
-        
-        # Tick through each day
+            anomaly_lookup.setdefault(entry["client_id"], []).append(entry)
+
         for day_offset in range(self.sim_days):
             current_date = start + datetime.timedelta(days=day_offset)
-            day_of_month = current_date.day
-            
+            dom = current_date.day
+
             for client in self.clients:
-                # Should this client transact today?
-                # Compare day_of_month to client's preferred_day
-                day_distance = abs(day_of_month - min(client.preferred_day, 
-                    calendar.monthrange(current_date.year, current_date.month)[1]))
-                
-                # Higher probability near preferred day
-                daily_prob = self._daily_probability(client, day_distance)
-                
-                if np.random.random() > daily_prob:
-                    continue
-                
-                # How many operations today?
-                total_monthly = sum(client.frequency.values())
-                n_ops = max(1, np.random.poisson(total_monthly / 30))
-                
-                # Check if this client is in an anomaly window today
-                is_anomaly = False
-                active_scenario = None
+                # Check anomaly window FIRST
+                active = None
                 if client.client_id in anomaly_lookup:
-                    for plan in anomaly_lookup[client.client_id]:
-                        if plan["start_day"] <= day_offset <= plan["end_day"]:
-                            is_anomaly = True
-                            active_scenario = plan
+                    for p in anomaly_lookup[client.client_id]:
+                        if p["start_day"] <= day_offset <= p["end_day"]:
+                            active = p
                             break
-                
-                for _ in range(n_ops):
-                    if is_anomaly:
-                        event = self._generate_anomalous_event(client, current_date, active_scenario)
-                    else:
-                        event = self._generate_normal_event(client, current_date)
-                    events.append(event)
-        
+
+                if active:
+                    normal = self._generate_normal_day(client, current_date)
+                    events.extend(self._apply_anomaly(client, current_date, active, normal))
+                else:
+                    dd = abs(dom - min(client.preferred_day,
+                        calendar.monthrange(current_date.year, current_date.month)[1]))
+                    if np.random.random() > self._daily_prob(client, dd):
+                        continue
+                    events.extend(self._generate_normal_day(client, current_date))
+
+            if day_offset % 30 == 0:
+                print(f"  Day {day_offset}/{self.sim_days} — {len(events)} events so far")
+
         return events
-    
-    def _daily_probability(self, client, day_distance):
-        # Bell curve around preferred day — closer = higher probability
-        base_rate = sum(client.frequency.values()) / 30
-        proximity_boost = np.exp(-0.5 * (day_distance / 3) ** 2)
-        return min(base_rate * proximity_boost, 0.95)
-    
-    def _generate_normal_event(self, client, date):
-        # Pick operation type from client's personal mix
+
+    # ------------------------------------------------------------------
+    # Normal-day helpers
+    # ------------------------------------------------------------------
+    def _daily_prob(self, client, day_distance):
+        base = sum(client.frequency.values()) / 30
+        boost = np.exp(-0.5 * (day_distance / 3) ** 2)
+        return min(base * boost, 0.95)
+
+    def _generate_normal_day(self, client, date):
+        dom = date.day
+        dd = abs(dom - min(client.preferred_day,
+            calendar.monthrange(date.year, date.month)[1]))
+        if np.random.random() > self._daily_prob(client, dd):
+            return []
+        n_ops = max(1, np.random.poisson(sum(client.frequency.values()) / 30))
+        return [self._normal_event(client, date) for _ in range(n_ops)]
+
+    def _normal_event(self, client, date):
         ops = list(client.operation_mix.keys())
         probs = list(client.operation_mix.values())
-        op_type = np.random.choice(ops, p=probs)
-        
-        # Layer 3: sample amount with noise
-        amount = np.clip(
-            np.random.normal(client.amount_mean[op_type], client.amount_std[op_type]),
-            5, None
-        )
-        amount = round(amount, 2)
-        
-        # Pick branch
-        if np.random.random() < client.branch_loyalty:
-            branch = client.home_branch
-        else:
-            branch = np.random.choice(self.branch_pool)
-        
-        # Pick employee from that branch (simplified)
-        employee = np.random.choice(self.branch_employees[branch])
-        
-        # Counterparty
-        if op_type in ["virement", "cheque"]:
+        op = np.random.choice(ops, p=probs)
+
+        amount = round(max(5, np.random.normal(
+            client.amount_mean[op], client.amount_std[op])), 2)
+
+        branch = (client.home_branch if np.random.random() < client.branch_loyalty
+                  else np.random.choice(self.branch_pool))
+        employee = np.random.choice(self.employee_pool)
+
+        beneficiary = None
+        if op in ("virement", "cheque"):
             if np.random.random() < client.counterparty_known_ratio:
                 beneficiary = f"KNOWN-{np.random.randint(1, 6)}"
             else:
                 beneficiary = f"NEW-{uuid.uuid4().hex[:8]}"
-        else:
-            beneficiary = None
-        
-        # Build payload based on operation type
-        payload = self._build_payload(op_type, beneficiary)
-        
-        # Random hour during branch hours (8h-16h)
+
         hour = np.random.randint(8, 16)
         minute = np.random.randint(0, 60)
-        timestamp = datetime.datetime.combine(date, datetime.time(hour, minute))
-        
+        ts = datetime.datetime.combine(date, datetime.time(hour, minute))
+
         return {
             "event_id": str(uuid.uuid4()),
             "client_id": client.client_id,
             "account_id": client.account_id,
             "employee_id": employee,
             "branch_id": branch,
-            "timestamp": timestamp.isoformat(),
+            "timestamp": ts.isoformat(),
             "amount": amount,
             "currency": "TND",
             "channel": "guichet",
-            "operation_type": op_type,
-            "payload": json.dumps(payload),
+            "operation_type": op,
+            "payload": json.dumps(self._payload(op, beneficiary)),
             "is_anomaly": False,
             "anomaly_type": None,
+            "difficulty": None,
         }
-    
-    def _build_payload(self, op_type, beneficiary=None):
-        if op_type == "retrait":
+
+    def _payload(self, op, beneficiary=None):
+        if op == "retrait":
             return {"mode": "especes"}
-        elif op_type == "versement":
+        if op == "versement":
             return {"depositor_id": None}
-        elif op_type == "virement":
+        if op == "virement":
             return {"beneficiary_id": beneficiary, "motif": "normal"}
-        elif op_type == "cheque":
-            return {"emitter_id": beneficiary, "cheque_number": f"CHQ-{uuid.uuid4().hex[:8]}"}
+        if op == "cheque":
+            return {"emitter_id": beneficiary,
+                    "cheque_number": f"CHQ-{uuid.uuid4().hex[:8]}"}
         return {}
-    
-    def _generate_anomalous_event(self, client, date, scenario):
-        # Start with a normal event, then modify based on scenario
-        event = self._generate_normal_event(client, date)
+
+    # ------------------------------------------------------------------
+    # Anomaly dispatch
+    # ------------------------------------------------------------------
+    def _mark(self, event, name, difficulty):
         event["is_anomaly"] = True
-        event["anomaly_type"] = scenario["scenario"]
-        
-        if scenario["scenario"] == "amount_spike":
-            event["amount"] = event["amount"] * np.random.uniform(5, 10)
-        
-        elif scenario["scenario"] == "round_amount":
-            event["amount"] = np.random.choice([5000, 10000, 15000, 20000])
-        
-        elif scenario["scenario"] == "smurfing":
-            event["operation_type"] = "versement"
-            event["amount"] = np.random.uniform(8000, 9800)
-            event["payload"] = json.dumps({"depositor_id": None})
-        
-        elif scenario["scenario"] == "frequency_burst":
-            pass  # frequency is handled by n_ops in the main loop
-        
-        elif scenario["scenario"] == "timing_anomaly":
-            hour = np.random.choice([6, 7, 17, 18])
-            old_ts = datetime.datetime.fromisoformat(event["timestamp"])
-            new_ts = old_ts.replace(hour=hour)
-            event["timestamp"] = new_ts.isoformat()
-        
-        # ... more scenarios to implement later
-        
-        event["amount"] = round(event["amount"], 2)
+        event["anomaly_type"] = name
+        event["difficulty"] = difficulty
         return event
-    
+
+    def _apply_anomaly(self, client, date, plan, normal_events):
+        name = plan["scenario"]
+        diff = plan["difficulty"]
+        dispatch = {
+            "amount_spike":              self._anom_amount_spike,
+            "round_amount":              self._anom_round_amount,
+            "duplicate_virement":        self._anom_duplicate_virement,
+            "timing_anomaly":            self._anom_timing,
+            "frequency_burst":           self._anom_frequency_burst,
+            "cumulative_threshold":      self._anom_cumulative_threshold,
+            "smurfing":                  self._anom_smurfing,
+            "cheque_structuring":        self._anom_cheque_structuring,
+            "repeated_client_employee":  self._anom_repeated_employee,
+        }
+        return dispatch[name](client, date, diff, normal_events)
+
+    # === EASY ============================================================
+
+    def _anom_amount_spike(self, client, date, diff, normal):
+        if not normal:
+            normal = [self._normal_event(client, date)]
+        idx = np.random.randint(len(normal))
+        normal[idx]["amount"] = round(normal[idx]["amount"] * np.random.uniform(5, 10), 2)
+        self._mark(normal[idx], "amount_spike", diff)
+        return normal
+
+    def _anom_round_amount(self, client, date, diff, normal):
+        if not normal:
+            normal = [self._normal_event(client, date)]
+        idx = np.random.randint(len(normal))
+        normal[idx]["amount"] = float(np.random.choice([5000, 10000, 15000, 20000]))
+        self._mark(normal[idx], "round_amount", diff)
+        return normal
+
+    def _anom_duplicate_virement(self, client, date, diff, normal):
+        # Find or create a virement
+        vir = None
+        for e in normal:
+            if e["operation_type"] == "virement":
+                vir = e
+                break
+        if vir is None:
+            vir = self._normal_event(client, date)
+            vir["operation_type"] = "virement"
+            ben = f"KNOWN-{np.random.randint(1, 6)}"
+            vir["payload"] = json.dumps({"beneficiary_id": ben, "motif": "normal"})
+            normal.append(vir)
+
+        dup = vir.copy()
+        dup["event_id"] = str(uuid.uuid4())
+        ts = datetime.datetime.fromisoformat(vir["timestamp"])
+        ts += datetime.timedelta(minutes=int(np.random.randint(5, 30)))
+        dup["timestamp"] = ts.isoformat()
+
+        self._mark(vir, "duplicate_virement", diff)
+        self._mark(dup, "duplicate_virement", diff)
+        normal.append(dup)
+        return normal
+
+    # === MEDIUM ==========================================================
+
+    def _anom_timing(self, client, date, diff, normal):
+        unusual = [5, 6, 7, 19, 20, 21]
+        if not normal:
+            normal = [self._normal_event(client, date)]
+        for e in normal:
+            h = int(np.random.choice(unusual))
+            ts = datetime.datetime.fromisoformat(e["timestamp"]).replace(hour=h)
+            e["timestamp"] = ts.isoformat()
+            self._mark(e, "timing_anomaly", diff)
+        return normal
+
+    def _anom_frequency_burst(self, client, date, diff, normal):
+        daily = max(1, sum(client.frequency.values()) / 30)
+        burst = int(daily * np.random.uniform(5, 8))
+        extras = []
+        for _ in range(burst):
+            e = self._normal_event(client, date)
+            self._mark(e, "frequency_burst", diff)
+            extras.append(e)
+        return normal + extras
+
+    def _anom_cumulative_threshold(self, client, date, diff, normal):
+        target_total = np.random.uniform(10500, 15000)
+        n_parts = np.random.randint(3, 6)
+        splits = np.random.dirichlet(np.ones(n_parts)) * target_total
+        extras = []
+        for amt in splits:
+            e = self._normal_event(client, date)
+            e["operation_type"] = "versement"
+            e["amount"] = round(min(float(amt), 9500), 2)
+            e["payload"] = json.dumps({"depositor_id": None})
+            self._mark(e, "cumulative_threshold", diff)
+            extras.append(e)
+        return normal + extras
+
+    # === HARD ============================================================
+
+    def _anom_smurfing(self, client, date, diff, normal):
+        n = np.random.randint(1, 3)
+        extras = []
+        for _ in range(n):
+            e = self._normal_event(client, date)
+            e["operation_type"] = "versement"
+            e["amount"] = round(np.random.uniform(8000, 9800), 2)
+            e["payload"] = json.dumps({"depositor_id": None})
+            self._mark(e, "smurfing", diff)
+            extras.append(e)
+        return normal + extras
+
+    def _anom_cheque_structuring(self, client, date, diff, normal):
+        n = np.random.randint(1, 3)
+        extras = []
+        for _ in range(n):
+            e = self._normal_event(client, date)
+            e["operation_type"] = "cheque"
+            e["amount"] = round(np.random.uniform(25000, 29900), 2)
+            emitter = f"NEW-{uuid.uuid4().hex[:8]}"
+            e["payload"] = json.dumps({
+                "emitter_id": emitter,
+                "cheque_number": f"CHQ-{uuid.uuid4().hex[:8]}"
+            })
+            self._mark(e, "cheque_structuring", diff)
+            extras.append(e)
+        return normal + extras
+
+    def _anom_repeated_employee(self, client, date, diff, normal):
+        forced_emp = np.random.choice(self.employee_pool)
+        n = np.random.randint(5, 9)
+        extras = []
+        for _ in range(n):
+            e = self._normal_event(client, date)
+            e["employee_id"] = forced_emp
+            self._mark(e, "repeated_client_employee", diff)
+            extras.append(e)
+        return normal + extras
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
     def export_csv(self, events, output_path="data/transactions.csv"):
         columns = [
             "event_id", "client_id", "account_id", "employee_id",
             "branch_id", "timestamp", "amount", "currency", "channel",
-            "operation_type", "payload", "is_anomaly", "anomaly_type"
+            "operation_type", "payload", "is_anomaly", "anomaly_type", "difficulty"
         ]
-        
-        # Sort by timestamp for temporal ordering
         events.sort(key=lambda e: e["timestamp"])
-        
         with open(output_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=columns)
             writer.writeheader()
             writer.writerows(events)
-        
         print(f"Exported {len(events)} events to {output_path}")
 
-
-    def export_clients(self, output_path="data/clients_master.csv"):
-        columns = [
-                "client_id", "archetype", "account_opening_date",
-                "nationality", "client_type", "home_branch_id",
-            ]
+    def export_clients(self, output_path="data/clients.csv"):
+        """Export client personality as the oracle profile baseline."""
+        columns = (
+            ["client_id", "account_id", "archetype", "home_branch",
+             "preferred_day", "branch_loyalty", "counterparty_known_ratio"]
+            + [f"op_mix_{op}" for op in ["retrait", "versement", "virement", "cheque"]]
+            + [f"amount_mean_{op}" for op in ["retrait", "versement", "virement", "cheque"]]
+            + [f"amount_std_{op}" for op in ["retrait", "versement", "virement", "cheque"]]
+            + [f"frequency_{op}" for op in ["retrait", "versement", "virement", "cheque"]]
+        )
         with open(output_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=columns)
-                writer.writeheader()
-                for client in self.clients:
-                    writer.writerow({
-                        "client_id": client.client_id,
-                        "archetype": client.archetype.name,
-                        "account_opening_date": client.account_opening_date.isoformat(),
-                        "nationality": "TN",
-                        "client_type": client.client_type,
-                        "home_branch_id": client.home_branch,
-                    })
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            for c in self.clients:
+                row = {
+                    "client_id": c.client_id,
+                    "account_id": c.account_id,
+                    "archetype": c.archetype.name,
+                    "home_branch": c.home_branch,
+                    "preferred_day": c.preferred_day,
+                    "branch_loyalty": c.branch_loyalty,
+                    "counterparty_known_ratio": c.counterparty_known_ratio,
+                }
+                for op in ["retrait", "versement", "virement", "cheque"]:
+                    row[f"op_mix_{op}"] = round(c.operation_mix.get(op, 0), 6)
+                    row[f"amount_mean_{op}"] = c.amount_mean.get(op, 0)
+                    row[f"amount_std_{op}"] = c.amount_std.get(op, 0)
+                    row[f"frequency_{op}"] = c.frequency.get(op, 0)
+                writer.writerow(row)
         print(f"Exported {len(self.clients)} clients to {output_path}")
-
-    def export_accounts(self, output_path="data/accounts.csv"):
-            ACCOUNT_TYPE_MAP = {
-                "salaried": "courant", "student": "courant",
-                "retiree": "courant", "small_business": "commercial",
-                "big_business": "commercial",
-            }
-            columns = ["account_id", "client_id", "account_type", "opening_date", "status"]
-            with open(output_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=columns)
-                writer.writeheader()
-                for client in self.clients:
-                    writer.writerow({
-                        "account_id": client.account_id,
-                        "client_id": client.client_id,
-                        "account_type": ACCOUNT_TYPE_MAP[client.archetype.name],
-                        "opening_date": client.account_opening_date.isoformat(),
-                        "status": "active",
-                    })
-            print(f"Exported {len(self.clients)} accounts to {output_path}")
-
-    def export_employees(self, output_path="data/employees_master.csv"):
-            columns = ["employee_id", "branch_id"]
-            with open(output_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=columns)
-                writer.writeheader()
-                for emp in self.employee_pool:
-                    writer.writerow(emp)
-            print(f"Exported {len(self.employee_pool)} employees to {output_path}")

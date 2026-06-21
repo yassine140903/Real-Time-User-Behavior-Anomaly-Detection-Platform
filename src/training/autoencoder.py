@@ -1,236 +1,181 @@
+"""
+Autoencoder for anomaly detection.
+
+Trained on normal events only. Anomaly score = mean squared reconstruction error.
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from pathlib import Path
-from sklearn.metrics import fbeta_score, precision_score, recall_score
-import optuna
 from sklearn.metrics import roc_auc_score
+import time
+import joblib
+import json
+import os
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ── Model ───────────────────────────────────────────────────
 class Autoencoder(nn.Module):
-    def __init__(self, input_dim, hidden_dims, dropout_rate):
+    def __init__(self, input_dim, hidden_dims=[20, 10]):
         super().__init__()
-        
+
         # Encoder
-        encoder_layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            encoder_layers.extend([
-                nn.Linear(prev_dim, h_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate),
-            ])
-            prev_dim = h_dim
-        self.encoder = nn.Sequential(*encoder_layers)
-        
+        enc = []
+        prev = input_dim
+        for h in hidden_dims:
+            enc += [nn.Linear(prev, h), nn.ReLU()]
+            prev = h
+        self.encoder = nn.Sequential(*enc)
+
         # Decoder (mirror)
-        decoder_layers = []
-        reversed_dims = list(reversed(hidden_dims[:-1])) + [input_dim]
-        for h_dim in reversed_dims:
-            decoder_layers.extend([
-                nn.Linear(prev_dim, h_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate),
-            ])
-            prev_dim = h_dim
-        # Replace last ReLU+Dropout with just Linear
-        decoder_layers = decoder_layers[:-2]  # remove last ReLU+Dropout
-        self.decoder = nn.Sequential(*decoder_layers)
-    
+        dec = []
+        for h in reversed(hidden_dims[:-1]):
+            dec += [nn.Linear(prev, h), nn.ReLU()]
+            prev = h
+        dec.append(nn.Linear(prev, input_dim))
+        self.decoder = nn.Sequential(*dec)
+
     def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return decoded
+        return self.decoder(self.encoder(x))
 
-# ── Training ────────────────────────────────────────────────
-def train_epoch(model, loader, optimizer, criterion):
-    model.train()
-    total_loss = 0
-    for batch, in loader:
-        batch = batch.to(DEVICE)
-        output = model(batch)
-        loss = criterion(output, batch)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * len(batch)
-    return total_loss / len(loader.dataset)
 
-def compute_reconstruction_error(model, data, method="topk", k=5):
-    model.eval()
-    with torch.no_grad():
-        tensor = torch.FloatTensor(data).to(DEVICE)
-        output = model(tensor)
-        per_feature_error = (tensor - output) ** 2
-        
-        if method == "mean":
-            scores = per_feature_error.mean(dim=1)
-        elif method == "max":
-            scores = per_feature_error.max(dim=1).values
-        elif method == "topk":
-            scores = per_feature_error.topk(k, dim=1).values.mean(dim=1)
-    
-    return scores.cpu().numpy()
+def train(data, hidden_dims=[20, 10], epochs=50, batch_size=256, lr=1e-3):
+    """
+    Train autoencoder on normal data. Returns trained model + best state dict.
 
-def find_best_threshold(errors_normal, errors_all, labels, beta=2):
-    best_score, best_threshold = 0, 0
-    
-    for p in np.arange(90, 99.9, 0.5):
-        threshold = np.percentile(errors_normal, p)
-        preds = (errors_all > threshold).astype(int)
-        score = fbeta_score(labels, preds, beta=beta, zero_division=0)
-        if score > best_score:
-            best_score = score
-            best_threshold = threshold
-    
-    return best_threshold, best_score
+    Args:
+        data: dict from data_prep.prepare()
+    """
+    X_train_t = torch.FloatTensor(data["X_train"])
+    X_val_t   = torch.FloatTensor(data["X_val"])
+    y_val     = data["y_val"]
 
-# ── Optuna objective ────────────────────────────────────────
-def objective(trial, train_data, val_X, val_y):
-    n_layers = trial.suggest_int("n_layers", 2, 3)
-    bottleneck = trial.suggest_int("bottleneck", 8, 24, step=4)
-    dropout = trial.suggest_float("dropout", 0.1, 0.4, step=0.05)
-    lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [128, 256])
-    
-    # Scoring strategy
-    score_method = trial.suggest_categorical("score_method", ["mean", "max", "topk"])
-    score_k = trial.suggest_int("score_k", 3, 10) if score_method == "topk" else 5
-    
-    input_dim = train_data.shape[1]
-    hidden_dims = []
-    for i in range(1, n_layers + 1):
-        dim = int(input_dim - (input_dim - bottleneck) * i / n_layers)
-        hidden_dims.append(max(dim, bottleneck))
-    
-    model = Autoencoder(input_dim, hidden_dims, dropout).to(DEVICE)
+    input_dim = data["X_train"].shape[1]
+    model = Autoencoder(input_dim, hidden_dims)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
-    
-    train_tensor = torch.FloatTensor(train_data)
-    loader = DataLoader(TensorDataset(train_tensor), batch_size=batch_size, shuffle=True)
-    
-    best_val_loss = float("inf")
-    patience, patience_counter = 5, 0
-    
-    for epoch in range(50):
-        train_loss = train_epoch(model, loader, optimizer, criterion)
-        
-        val_normal = val_X[val_y == 0]
-        val_errors = compute_reconstruction_error(model, val_normal, method="mean")
-        val_loss = val_errors.mean()
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                break
-    
-    # Score with the trial's method
-    errors_all = compute_reconstruction_error(model, val_X, method=score_method, k=score_k)
-    
-    try:
-        auc = roc_auc_score(val_y, errors_all)
-    except ValueError:
-        auc = 0.5
-    
-    return auc
 
-# ── Main ────────────────────────────────────────────────────
-def run_optuna(n_trials=50):
-    data = np.load(PROJECT_ROOT / "data" / "training" / "autoencoder.npz")
-    train_data = data["train"]
-    val_X, val_y = data["val_X"], data["val_y"]
-    
-    study = optuna.create_study(direction="maximize")  # maximize F1
-    study.optimize(lambda trial: objective(trial, train_data, val_X, val_y),
-                   n_trials=n_trials)
-    
-    print(f"\nBest F1: {study.best_value:.4f}")
-    print(f"Best params: {study.best_params}")
-    return study
+    loader = DataLoader(TensorDataset(X_train_t),
+                        batch_size=batch_size, shuffle=True)
 
-def train_final_model(params, train_data, val_X, val_y):
-    input_dim = train_data.shape[1]
-    
-    hidden_dims = []
-    for i in range(1, params["n_layers"] + 1):
-        dim = int(input_dim - (input_dim - params["bottleneck"]) * i / params["n_layers"])
-        hidden_dims.append(max(dim, params["bottleneck"]))
-    
-    model = Autoencoder(input_dim, hidden_dims, params["dropout"]).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=params["lr"])
-    criterion = nn.MSELoss()
-    
-    loader = DataLoader(
-        TensorDataset(torch.FloatTensor(train_data)),
-        batch_size=params["batch_size"], shuffle=True
-    )
-    
-    best_val_loss = float("inf")
-    patience_counter = 0
+    print(f"Architecture: {input_dim} → {' → '.join(map(str, hidden_dims))}"
+          f" → {' → '.join(map(str, reversed(hidden_dims[:-1])))} → {input_dim}")
+    print(f"Training on {len(X_train_t)} normal events, {epochs} epochs\n")
+
+    best_val_auc = 0
     best_state = None
-    
-    for epoch in range(100):
-        train_loss = train_epoch(model, loader, optimizer, criterion)
-        val_errors = compute_reconstruction_error(model, val_X[val_y == 0], method="mean")
-        val_loss = val_errors.mean()
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_state = model.state_dict().copy()
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= 10:
-                break
-        
-        if epoch % 10 == 0:
-            print(f"  Epoch {epoch}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
-    
+
+    t0 = time.time()
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0
+        for (batch,) in loader:
+            recon = model(batch)
+            loss = criterion(recon, batch)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+
+        avg_loss = epoch_loss / len(loader)
+
+        if (epoch + 1) % 5 == 0:
+            model.eval()
+            with torch.no_grad():
+                val_recon = model(X_val_t)
+                val_scores = (val_recon - X_val_t).pow(2).mean(dim=1).numpy()
+                val_auc = (roc_auc_score(y_val, val_scores)
+                           if y_val.sum() > 0 else 0.0)
+
+            marker = " ★" if val_auc > best_val_auc else ""
+            if val_auc > best_val_auc:
+                best_val_auc = val_auc
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+
+            print(f"  Epoch {epoch+1:>3}/{epochs}  "
+                  f"loss={avg_loss:.6f}  val_AUC={val_auc:.4f}{marker}")
+
+    print(f"\nTraining time: {time.time() - t0:.1f}s")
+    print(f"Best validation AUC: {best_val_auc:.4f}")
+
+    # Load best
     model.load_state_dict(best_state)
     
-    score_method = params.get("score_method", "topk")
-    score_k = params.get("score_k", 5)
+    # Save artifacts
+    os.makedirs("models", exist_ok=True)
+    torch.save(best_state, "models/autoencoder.pt")
+    joblib.dump(data["scaler"], "models/scaler.pkl")
+    with open("models/feature_cols.json", "w") as f:
+        json.dump(data["feature_cols"], f)
+    print(f"Saved model + scaler + feature_cols to models/")
     
-    errors_normal = compute_reconstruction_error(model, val_X[val_y == 0], method=score_method, k=score_k)
-    errors_all = compute_reconstruction_error(model, val_X, method=score_method, k=score_k)
-    threshold, fbeta = find_best_threshold(errors_normal, errors_all, val_y, beta=2)
-    
-    auc = roc_auc_score(val_y, errors_all)
-    print(f"\nFinal model — Val AUC: {auc:.4f}, F2: {fbeta:.4f}, Threshold: {threshold:.6f}")
-    print(f"Scoring: {score_method} (k={score_k})")
-    
-    save_dir = PROJECT_ROOT / "models"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    torch.save({
-        "model_state": model.state_dict(),
-        "params": params,
-        "hidden_dims": hidden_dims,
-        "input_dim": input_dim,
-        "threshold": threshold,
-        "val_auc": auc,
-        "val_fbeta": fbeta,
-        "score_method": score_method,
-        "score_k": score_k,
-    }, save_dir / "autoencoder.pt")
-    
-    print(f"Saved to {save_dir / 'autoencoder.pt'}")
-    return model, threshold
+    return model
 
 
-if __name__ == "__main__":
-    study = run_optuna(n_trials=50)
-    
-    # Retrain best model and save
-    data = np.load(PROJECT_ROOT / "data" / "training" / "autoencoder.npz")
-    model, threshold = train_final_model(
-        study.best_params, data["train"], data["val_X"], data["val_y"]
-    )
+def evaluate(model, data):
+    """Evaluate on test set. Print overall + per-scenario + per-difficulty AUC."""
+
+    X_test_t = torch.FloatTensor(data["X_test"])
+    y_test   = data["y_test"]
+    test_df  = data["test_df"].copy()
+
+    model.eval()
+    with torch.no_grad():
+        recon = model(X_test_t)
+        scores = (recon - X_test_t).pow(2).mean(dim=1).numpy()
+
+    # Overall
+    test_auc = roc_auc_score(y_test, scores)
+    print(f"\n{'='*40}")
+    print(f"  OVERALL TEST AUC: {test_auc:.4f}")
+    print(f"{'='*40}")
+
+    # Per-scenario
+    test_df["score"] = scores
+    normal_mask = test_df["is_anomaly"] == False
+
+    print(f"\nPer-scenario AUC (test set):")
+    print(f"  {'Scenario':<30s}  {'AUC':>6s}  {'Count':>5s}  {'Difficulty'}")
+    print(f"  {'-'*65}")
+
+    anom_groups = (test_df[test_df["is_anomaly"] == True]
+                   .groupby(["anomaly_type", "difficulty"])
+                   .size().reset_index(name="count"))
+
+    for _, row in anom_groups.iterrows():
+        atype, diff, count = row["anomaly_type"], row["difficulty"], row["count"]
+        anom_mask = test_df["anomaly_type"] == atype
+        subset = test_df[anom_mask | normal_mask]
+        y_sub = subset["is_anomaly"].values.astype(int)
+        s_sub = subset["score"].values
+
+        if y_sub.sum() > 0 and y_sub.sum() < len(y_sub):
+            auc = roc_auc_score(y_sub, s_sub)
+        else:
+            auc = float("nan")
+        print(f"  {atype:<30s}  {auc:>6.4f}  {count:>5d}  {diff}")
+
+    # Per-difficulty
+    print(f"\nPer-difficulty AUC:")
+    for diff in ["easy", "medium", "hard"]:
+        diff_mask = test_df["difficulty"] == diff
+        if diff_mask.sum() == 0:
+            continue
+        subset = test_df[diff_mask | normal_mask]
+        y_sub = subset["is_anomaly"].values.astype(int)
+        s_sub = subset["score"].values
+        auc = (roc_auc_score(y_sub, s_sub)
+               if 0 < y_sub.sum() < len(y_sub) else float("nan"))
+        print(f"  {diff:<10s}  AUC={auc:.4f}  n={int(diff_mask.sum())}")
+
+    # Score distribution
+    print(f"\nScore distribution:")
+    print(f"  Normal  — mean={scores[y_test==0].mean():.6f}  "
+          f"std={scores[y_test==0].std():.6f}  "
+          f"p95={np.percentile(scores[y_test==0], 95):.6f}")
+    if y_test.sum() > 0:
+        print(f"  Anomaly — mean={scores[y_test==1].mean():.6f}  "
+              f"std={scores[y_test==1].std():.6f}  "
+              f"p5={np.percentile(scores[y_test==1], 5):.6f}")
+
+    return test_auc, scores
