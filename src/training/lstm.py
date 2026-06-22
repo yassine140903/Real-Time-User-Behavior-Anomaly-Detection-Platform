@@ -49,6 +49,7 @@ def build_sequences(df, feature_cols, seq_len=10):
             sequences.append(seq)
             targets.append(target)
             meta_rows.append({
+                "event_id": row["event_id"],      # ← add this
                 "day_offset": row["day_offset"],
                 "is_anomaly": row["is_anomaly"],
                 "anomaly_type": row.get("anomaly_type"),
