@@ -10,7 +10,7 @@ DB_CONFIG = {
     "port": 5432,
     "dbname": "amen_anomaly",
     "user": "postgres",
-    "password": "pwd",
+    "password": "9011361923257228",
 }
 
 SIM_START = datetime(2025, 1, 1)

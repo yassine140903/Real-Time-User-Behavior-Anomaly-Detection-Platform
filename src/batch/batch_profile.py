@@ -11,7 +11,7 @@ DB_CONFIG = {
     "port": 5432,
     "dbname": "amen_anomaly",
     "user": "postgres",
-    "password": "pwd",
+    "password": "9011361923257228",
 }
 
 
@@ -174,34 +174,6 @@ def compute_behavioral_patterns(client_txs, ref_date):
         return patterns
 
 
-def compute_financial_state(client_txs, ref_date):
-    """
-    Category 4: Financial state.
-    
-    We don't have real balance data, but we can compute
-    cumulative flows from transactions. These are proxies.
-    """
-    state = {}
-    
-    for window_name, days in [("30d", 30), ("90d", 90)]:
-        cutoff = ref_date - timedelta(days=days)
-        windowed = client_txs[client_txs["timestamp"] >= cutoff]
-        
-        prefix = f"flow_{window_name}"
-        
-        # Inflows: versement + cheque (money coming in)
-        inflow = windowed[windowed["operation_type"].isin(["versement", "cheque"])]["amount"].sum()
-        
-        # Outflows: retrait + virement (money going out)
-        outflow = windowed[windowed["operation_type"].isin(["retrait", "virement"])]["amount"].sum()
-        
-        state[f"{prefix}_inflow"] = round(float(inflow), 2)
-        state[f"{prefix}_outflow"] = round(float(outflow), 2)
-        state[f"{prefix}_net"] = round(float(inflow - outflow), 2)
-    
-    return state
-
-
 def compute_recent_events_buffer(client_txs, n=50):
     """
     Category 6: Last N events for LSTM sequence input.
@@ -239,10 +211,7 @@ def compute_client_profile(client_id, client_txs, client_info, ref_date):
     
     # Category 3: Behavioral patterns
     profile.update(compute_behavioral_patterns(client_txs, ref_date))
-    
-    # Category 4: Financial state
-    profile.update(compute_financial_state(client_txs, ref_date))
-    
+        
     # Category 5: Risk history — skipped, no alerts yet
     
     # Category 6: Recent events buffer

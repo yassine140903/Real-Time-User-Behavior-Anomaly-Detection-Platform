@@ -194,7 +194,11 @@ def _compute_features(row, prof, cbuf, ebuf, ts, amount, op, eid, sim_start):
         arch = prof.get("archetype", "salaried")
         for a in ARCHETYPES:
             f[f"arch_{a}"] = 1 if arch == a else 0
-        f["account_age_days"] = (ts - sim_start).days
+        if prof is not None:
+            opening = pd.Timestamp(prof.get("account_opening_date", sim_start))
+            f["account_age_days"] = (ts - opening).days
+        else:
+            f["account_age_days"] = 0
     else:
         for a in ARCHETYPES:
             f[f"arch_{a}"] = 0

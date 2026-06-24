@@ -18,14 +18,22 @@ class Generator:
 
         self.archetypes, self.proportions = load_archetypes(config_path)
         self.branch_pool = [f"BR-{str(i).zfill(3)}" for i in range(1, num_branches + 1)]
-        self.employee_pool = [f"EMP-{str(i).zfill(4)}" for i in range(1, num_branches * 2 + 1)]
+
+        # Branch-linked employees: 2 per branch
+        self.branch_employees = {}
+        emp_counter = 1
+        for branch in self.branch_pool:
+            self.branch_employees[branch] = [
+                f"EMP-{str(emp_counter).zfill(4)}",
+                f"EMP-{str(emp_counter + 1).zfill(4)}",
+            ]
+            emp_counter += 2
+        self.employee_pool = [emp for emps in self.branch_employees.values() for emp in emps]
 
         self.clients = self._create_population(num_clients)
         self.client_lookup = {c.client_id: c for c in self.clients}
         self.anomaly_plan = self._plan_anomalies()
 
-    # ------------------------------------------------------------------
-    # Population
     # ------------------------------------------------------------------
     def _create_population(self, num_clients):
         clients = []
@@ -37,8 +45,6 @@ class Generator:
         return clients
 
     # ------------------------------------------------------------------
-    # Anomaly planning
-    # ------------------------------------------------------------------
     def _plan_anomalies(self):
         plan = []
 
@@ -49,15 +55,12 @@ class Generator:
         num_anomalous = int(total_events * self.anomaly_rate)
 
         scenarios = [
-            # Easy (10%) — single-event, single-dimension
             {"name": "amount_spike",       "difficulty": "easy",   "duration": 1},
             {"name": "round_amount",       "difficulty": "easy",   "duration": 1},
             {"name": "duplicate_virement", "difficulty": "easy",   "duration": 1},
-            # Medium (30%) — short-term multi-event
             {"name": "timing_anomaly",         "difficulty": "medium", "duration": 3},
             {"name": "frequency_burst",        "difficulty": "medium", "duration": 3},
             {"name": "cumulative_threshold",   "difficulty": "medium", "duration": 1},
-            # Hard (60%) — sustained coordinated patterns
             {"name": "smurfing",                  "difficulty": "hard", "duration": 7},
             {"name": "cheque_structuring",        "difficulty": "hard", "duration": 7},
             {"name": "repeated_client_employee",  "difficulty": "hard", "duration": 1},
@@ -65,10 +68,9 @@ class Generator:
 
         difficulty_share = {"easy": 0.10, "medium": 0.30, "hard": 0.60}
 
-        # Rough events-per-entry for budget tracking
         def _est_events(s):
             if s["name"] == "frequency_burst":
-                return 15  # ~5x normal over 3 days
+                return 15
             elif s["name"] in ("smurfing", "cheque_structuring"):
                 return s["duration"] * 2
             elif s["name"] == "cumulative_threshold":
@@ -101,13 +103,10 @@ class Generator:
         return plan
 
     # ------------------------------------------------------------------
-    # Main generation loop
-    # ------------------------------------------------------------------
     def generate(self, start_date="2025-01-01"):
         events = []
         start = datetime.date.fromisoformat(start_date)
 
-        # Build lookup: client_id -> list of plan entries
         anomaly_lookup = {}
         for entry in self.anomaly_plan:
             anomaly_lookup.setdefault(entry["client_id"], []).append(entry)
@@ -117,7 +116,6 @@ class Generator:
             dom = current_date.day
 
             for client in self.clients:
-                # Check anomaly window FIRST
                 active = None
                 if client.client_id in anomaly_lookup:
                     for p in anomaly_lookup[client.client_id]:
@@ -140,8 +138,6 @@ class Generator:
 
         return events
 
-    # ------------------------------------------------------------------
-    # Normal-day helpers
     # ------------------------------------------------------------------
     def _daily_prob(self, client, day_distance):
         base = sum(client.frequency.values()) / 30
@@ -167,7 +163,7 @@ class Generator:
 
         branch = (client.home_branch if np.random.random() < client.branch_loyalty
                   else np.random.choice(self.branch_pool))
-        employee = np.random.choice(self.employee_pool)
+        employee = np.random.choice(self.branch_employees[branch])
 
         beneficiary = None
         if op in ("virement", "cheque"):
@@ -210,8 +206,6 @@ class Generator:
         return {}
 
     # ------------------------------------------------------------------
-    # Anomaly dispatch
-    # ------------------------------------------------------------------
     def _mark(self, event, name, difficulty):
         event["is_anomaly"] = True
         event["anomaly_type"] = name
@@ -234,7 +228,7 @@ class Generator:
         }
         return dispatch[name](client, date, diff, normal_events)
 
-    # === EASY ============================================================
+    # === EASY ==========================================================
 
     def _anom_amount_spike(self, client, date, diff, normal):
         if not normal:
@@ -253,7 +247,6 @@ class Generator:
         return normal
 
     def _anom_duplicate_virement(self, client, date, diff, normal):
-        # Find or create a virement
         vir = None
         for e in normal:
             if e["operation_type"] == "virement":
@@ -277,7 +270,7 @@ class Generator:
         normal.append(dup)
         return normal
 
-    # === MEDIUM ==========================================================
+    # === MEDIUM ========================================================
 
     def _anom_timing(self, client, date, diff, normal):
         unusual = [5, 6, 7, 19, 20, 21]
@@ -314,7 +307,7 @@ class Generator:
             extras.append(e)
         return normal + extras
 
-    # === HARD ============================================================
+    # === HARD ==========================================================
 
     def _anom_smurfing(self, client, date, diff, normal):
         n = np.random.randint(1, 3)
@@ -345,12 +338,14 @@ class Generator:
         return normal + extras
 
     def _anom_repeated_employee(self, client, date, diff, normal):
-        forced_emp = np.random.choice(self.employee_pool)
+        forced_branch = np.random.choice(self.branch_pool)
+        forced_emp = np.random.choice(self.branch_employees[forced_branch])
         n = np.random.randint(5, 9)
         extras = []
         for _ in range(n):
             e = self._normal_event(client, date)
             e["employee_id"] = forced_emp
+            e["branch_id"] = forced_branch
             self._mark(e, "repeated_client_employee", diff)
             extras.append(e)
         return normal + extras
@@ -372,7 +367,6 @@ class Generator:
         print(f"Exported {len(events)} events to {output_path}")
 
     def export_clients(self, output_path="data/clients.csv"):
-        """Export client personality as the oracle profile baseline."""
         columns = (
             ["client_id", "account_id", "archetype", "home_branch",
              "preferred_day", "branch_loyalty", "counterparty_known_ratio"]
@@ -380,6 +374,7 @@ class Generator:
             + [f"amount_mean_{op}" for op in ["retrait", "versement", "virement", "cheque"]]
             + [f"amount_std_{op}" for op in ["retrait", "versement", "virement", "cheque"]]
             + [f"frequency_{op}" for op in ["retrait", "versement", "virement", "cheque"]]
+            + ["account_opening_date"]
         )
         with open(output_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=columns)
@@ -393,6 +388,7 @@ class Generator:
                     "preferred_day": c.preferred_day,
                     "branch_loyalty": c.branch_loyalty,
                     "counterparty_known_ratio": c.counterparty_known_ratio,
+                    "account_opening_date": c.account_opening_date.isoformat(),
                 }
                 for op in ["retrait", "versement", "virement", "cheque"]:
                     row[f"op_mix_{op}"] = round(c.operation_mix.get(op, 0), 6)

@@ -9,7 +9,7 @@ DB_CONFIG = {
     "port": 5432,
     "dbname": "amen_anomaly",
     "user": "postgres",
-    "password": "pwd",
+    "password": "9011361923257228",
 }
 
 OPERATIONS = ["retrait", "versement", "virement", "cheque"]
