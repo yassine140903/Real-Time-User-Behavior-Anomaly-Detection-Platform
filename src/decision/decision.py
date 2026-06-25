@@ -5,10 +5,11 @@ Decision Service.
 Consumes scored events (fused score + raw event + profile data)
 and assigns alert tiers: INFO / REVIEW / ALERT / BLOCK.
 
-Three layers of logic applied in order:
+Four layers of logic applied in order:
   1. Score-based tier assignment (from calibrated thresholds)
   2. Regulatory rule escalation (hard LAB/FT overrides)
   3. Risk history adjustment (recidivist escalation / false-positive dampening)
+  4. Explanation assembly (human-readable reasons based on trigger type)
 
 Tiers can only be ESCALATED by rules, never de-escalated.
 """
@@ -17,6 +18,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, List
 from enum import IntEnum
+from src.decision.explainer import assemble_explanation
 
 
 class AlertTier(IntEnum):
@@ -46,7 +48,6 @@ class DecisionInput:
     timestamp: str
 
     # ── From enriched features ──────────────────────────
-    # These come from the 30 contrast features
     z_amount: float = 0.0
     tx_count_24h: int = 0
     cumulative_amount_24h: float = 0.0
@@ -59,8 +60,8 @@ class DecisionInput:
     # ── From client profile (stubbed until streaming) ───
     days_since_opening: int = 0
     archetype: str = "unknown"
-    regulatory_client_type: str = "habitual"   # occasional / habitual
-    maturity_status: str = "mature"            # cold / mature
+    regulatory_client_type: str = "habitual"
+    maturity_status: str = "mature"
     home_branch: str = ""
 
     # Risk history (stubbed — no alerts table yet)
@@ -69,6 +70,10 @@ class DecisionInput:
     rejected_count_30d: int = 0
     days_since_last_alert: int = 999
     expected_daily_rate: float = 1.0
+
+    # ── From Scoring Service (explanations) ─────────────
+    ae_explanation: Optional[dict] = None
+    lstm_explanation: Optional[dict] = None
 
 
 @dataclass
@@ -79,6 +84,7 @@ class Decision:
     fused_score: float
     reasons: List[str] = field(default_factory=list)
     regulatory_flags: List[str] = field(default_factory=list)
+    explanation: Optional[dict] = None
 
     def to_dict(self):
         return {
@@ -87,6 +93,7 @@ class Decision:
             "fused_score": round(self.fused_score, 6),
             "reasons": self.reasons,
             "regulatory_flags": self.regulatory_flags,
+            "explanation": self.explanation,
         }
 
 
@@ -99,30 +106,25 @@ class DecisionService:
     """
 
     # ── Score-based thresholds (calibrated on validation set) ──
-    T1 = 0.95    # INFO → REVIEW
-    T2 = 0.99    # REVIEW → ALERT
-    T3 = 0.999   # ALERT → BLOCK
+    T1 = 0.95
+    T2 = 0.99
+    T3 = 0.999
 
     # ── Regulatory constants ───────────────────────────────────
-    REPORTING_THRESHOLD = 10_000      # DT — BCT mandatory reporting
-    SMURFING_BAND_LOW  = 8_000       # DT
-    SMURFING_BAND_HIGH = 9_999       # DT
-    CHEQUE_CEILING     = 30_000      # DT — Law n°41-2024
-    PASSEUR_VERSEMENT_LIMIT = 5      # for occasional clients
+    REPORTING_THRESHOLD = 10_000
+    SMURFING_BAND_LOW  = 8_000
+    SMURFING_BAND_HIGH = 9_999
+    CHEQUE_CEILING     = 30_000
+    PASSEUR_VERSEMENT_LIMIT = 5
     ROUND_AMOUNT_VALUES = {1000, 2000, 3000, 5000, 10000, 15000, 20000}
 
     # ── Risk history thresholds ────────────────────────────────
-    RECIDIVIST_CONFIRMED_30D = 3     # 3+ confirmed alerts → escalate
-    FALSE_POSITIVE_REJECTED_30D = 3  # 3+ rejected alerts → dampen
+    RECIDIVIST_CONFIRMED_30D = 3
+    FALSE_POSITIVE_REJECTED_30D = 3
 
     def decide(self, inp: DecisionInput) -> Decision:
         """
-        Main entry point. Returns a Decision with tier + reasons.
-
-        Logic:
-          1. Score-based tier
-          2. Regulatory rules (can only escalate)
-          3. Risk history adjustment (can escalate or dampen)
+        Main entry point. Returns a Decision with tier + reasons + explanation.
         """
         reasons = []
         reg_flags = []
@@ -147,18 +149,15 @@ class DecisionService:
         # LAYER 2: Regulatory rule escalation
         # ════════════════════════════════════════════════════════
 
-        # Rule 1: Mandatory reporting threshold
         # Rule 1: Mandatory reporting threshold (context-aware)
         if inp.amount >= self.REPORTING_THRESHOLD:
             reg_flags.append(
                 f"Amount {inp.amount:.2f} DT >= {self.REPORTING_THRESHOLD} DT "
                 f"reporting threshold (BCT)")
-            # Only escalate if unusual for this client
             if inp.z_amount >= 2.0:
                 tier = max(tier, AlertTier.ALERT)
 
         # Rule 2: Smurfing band detection
-        # Multiple transactions in 8k-10k band within 7 days
         if (self.SMURFING_BAND_LOW <= inp.amount <= self.SMURFING_BAND_HIGH
                 and inp.near_threshold_count_7d >= 2):
             reg_flags.append(
@@ -175,8 +174,7 @@ class DecisionService:
                 f"{self.CHEQUE_CEILING} DT ceiling (Law n°41-2024)")
             tier = max(tier, AlertTier.REVIEW)
 
-        # Rule 4: Passeur de fonds — occasional client, many versements
-        # to same beneficiary (CTAF September 2021)
+        # Rule 4: Passeur de fonds (CTAF September 2021)
         if (inp.regulatory_client_type == "occasional"
                 and inp.operation_type == "versement"
                 and inp.tx_count_24h >= self.PASSEUR_VERSEMENT_LIMIT):
@@ -219,15 +217,14 @@ class DecisionService:
         # LAYER 3: Risk history adjustment
         # ════════════════════════════════════════════════════════
 
-        # Recidivist escalation: client has many confirmed alerts recently
+        # Recidivist escalation
         if inp.confirmed_count_30d >= self.RECIDIVIST_CONFIRMED_30D:
             reasons.append(
                 f"Recidivist: {inp.confirmed_count_30d} confirmed alerts "
                 f"in 30d — escalating")
             tier = min(tier + 1, AlertTier.BLOCK)
 
-        # False-positive dampening: client has many rejected alerts recently
-        # Only dampens REVIEW → INFO, never touches ALERT or BLOCK
+        # False-positive dampening (REVIEW → INFO only, no reg flags)
         if (inp.rejected_count_30d >= self.FALSE_POSITIVE_REJECTED_30D
                 and tier == AlertTier.REVIEW
                 and len(reg_flags) == 0):
@@ -236,8 +233,7 @@ class DecisionService:
                 f"no regulatory flags — REVIEW → INFO")
             tier = AlertTier.INFO
 
-        # Cold-start conservatism: new clients get benefit of the doubt
-        # pushed UP, not down — less history means more caution
+        # Cold-start conservatism
         if (inp.maturity_status == "cold"
                 and tier == AlertTier.INFO
                 and inp.fused_score >= 0.90):
@@ -246,10 +242,38 @@ class DecisionService:
                 f"— escalating to REVIEW for manual check")
             tier = AlertTier.REVIEW
 
+        # ════════════════════════════════════════════════════════
+        # LAYER 4: Assemble explanation
+        # ════════════════════════════════════════════════════════
+        score_triggered = inp.fused_score >= self.T1
+        rule_triggered = len(reg_flags) > 0
+
+        if score_triggered and rule_triggered:
+            trigger_type = "both"
+        elif rule_triggered:
+            trigger_type = "rule"
+        elif score_triggered:
+            trigger_type = "ml"
+        else:
+            trigger_type = None
+
+        explanation = None
+        if tier > AlertTier.INFO:
+            rule_details = [{"rule": f"rule_{i}", "description": desc}
+                           for i, desc in enumerate(reg_flags)]
+
+            explanation = assemble_explanation(
+                trigger_type=trigger_type,
+                ae_explanation=inp.ae_explanation,
+                lstm_explanation=inp.lstm_explanation,
+                rule_details=rule_details if rule_triggered else None,
+            )
+
         return Decision(
             event_id=inp.event_id,
             tier=tier,
             fused_score=inp.fused_score,
             reasons=reasons,
             regulatory_flags=reg_flags,
+            explanation=explanation,
         )
