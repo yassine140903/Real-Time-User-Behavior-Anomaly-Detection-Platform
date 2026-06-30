@@ -86,11 +86,57 @@ class ProfileHydrator:
         print(f"Hydrated {len(rows)} archetype baselines into Redis")
         return len(rows)
     
+
+    def hydrate_client_buffers(self):
+        cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        cursor.execute("""
+            SELECT DISTINCT ON (client_id)
+                client_id, profile_data
+            FROM profile_snapshots
+            ORDER BY client_id, computed_at DESC
+        """)
+        
+        rows = cursor.fetchall()
+        pipe = self.redis.pipeline()
+        count = 0
+        
+        for row in rows:
+            profile = row['profile_data']
+            if isinstance(profile, str):
+                profile = json.loads(profile)
+            
+            buffer = profile.get('recent_events_buffer', [])
+            if not buffer:
+                continue
+            
+            # Map to enrichment service buffer format
+            cbuf = []
+            for evt in buffer:
+                cbuf.append({
+                    'ts': evt['timestamp'],
+                    'amount': evt['amount'],
+                    'op': evt['operation_type'],
+                    'eid': evt.get('employee_id', ''),
+                    'payload': '{}'
+                })
+            
+            pipe.set(
+                f"buffer:client:{row['client_id']}",
+                json.dumps(cbuf)
+            )
+            count += 1
+        
+        pipe.execute()
+        cursor.close()
+        print(f"Hydrated {count} client buffers into Redis")
+        return count
     def run(self):
         print("Starting profile hydration...")
         self.hydrate_client_profiles()
         self.hydrate_employee_profiles()
         self.hydrate_archetype_baselines()
+        self.hydrate_client_buffers()
         print("Hydration complete")
     
     def close(self):

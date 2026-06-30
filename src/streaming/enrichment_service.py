@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from kafka import KafkaConsumer, KafkaProducer
 from src.config import KAFKA_BOOTSTRAP, REDIS_HOST, REDIS_PORT
+from pathlib import Path
 
 OPS = ["retrait", "versement", "virement", "cheque"]
 ARCHETYPES = ["salaried", "small_business", "student", "retiree", "big_business"]
@@ -31,6 +32,11 @@ class EnrichmentService:
         )
 
         self.redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+        models_dir = Path("models")
+        with open(models_dir / "feature_cols.json") as f:
+            self.feature_cols = json.load(f)
+        with open(models_dir / "lstm_config.json") as f:
+            self.seq_len = json.load(f)["seq_len"]
 
     def get_client_profile(self, client_id):
         data = self.redis.get(f"profile:client:{client_id}")
@@ -116,6 +122,14 @@ class EnrichmentService:
         self.set_buffer(f"buffer:client:{cid}", cbuf_store)
         self.set_buffer(f"buffer:employee:{eid}", ebuf_store)
 
+        feat_vector = [f.get(col, 0.0) for col in self.feature_cols]
+        seq_key = f"sequence:client:{cid}"
+        seq_buf = self.get_buffer(seq_key)
+        seq_buf.append(feat_vector)
+        if len(seq_buf) > self.seq_len:
+            seq_buf = seq_buf[-self.seq_len:]
+        self.set_buffer(seq_key, seq_buf)
+
         return f
 
     def _compute_features(self, row, prof, cbuf, ebuf, ts, amount, op, eid):
@@ -129,14 +143,36 @@ class EnrichmentService:
             f[f'op_{o}'] = 1 if op == o else 0
 
         if prof is not None:
-            f['is_home_branch'] = 1 if row['branch_id'] == prof.get('home_branch') else 0
+            f['is_home_branch'] = 1 if row['branch_id'] == prof.get('home_branch_id') else 0
         else:
             f['is_home_branch'] = 1
 
         # ── AMOUNT CONTRAST ────────────────────────────────────
         if prof is not None:
-            p_mean = prof.get(f'amount_mean_{op}', amount)
-            p_std = prof.get(f'amount_std_{op}', 1.0)
+            p_count = prof.get(f'tx_{op}_30d_count', 0)
+            if p_count > 0:
+                p_mean = float(prof.get(f'tx_{op}_30d_mean', amount))
+                p_std = float(prof.get(f'tx_{op}_30d_std', 1.0))
+            else:
+                p_count_90 = prof.get(f'tx_{op}_90d_count', 0)
+                if p_count_90 > 0:
+                    p_mean = float(prof.get(f'tx_{op}_90d_mean', amount))
+                    p_std = float(prof.get(f'tx_{op}_90d_std', 1.0))
+                else:
+                    arch = prof.get('archetype', 'salaried')
+                    baseline_data = self.redis.get(f"baseline:{arch}")
+                    if baseline_data:
+                        baseline = json.loads(baseline_data)
+                        p_mean = float(baseline.get(f'amount_{op}_mean', amount))
+                        p_std = float(baseline.get(f'amount_{op}_std', 1.0))
+                    else:
+                        p_mean = amount
+                        p_std = 1.0
+
+
+
+
+
             p_mean = float(p_mean) if p_mean is not None else amount
             p_std = float(p_std) if p_std is not None else 1.0
             f['z_amount'] = (amount - p_mean) / max(p_std, 1.0)
@@ -152,18 +188,15 @@ class EnrichmentService:
 
         # ── OPERATION CONTRAST ─────────────────────────────────
         if prof is not None:
-            f['op_type_probability'] = float(prof.get(f'op_mix_{op}', 0.25))
+            op_dist = prof.get('dist_30d_operation', {})
+            f['op_type_probability'] = float(op_dist.get(op, 0.25))
         else:
             f['op_type_probability'] = 0.25
 
         # ── TIMING CONTRAST ────────────────────────────────────
         f['is_outside_hours'] = 1 if ts.hour < 8 or ts.hour >= 16 else 0
 
-        if prof is not None:
-            pday = int(prof.get('preferred_day', 15))
-            f['day_distance_from_preferred'] = abs(ts.day - pday)
-        else:
-            f['day_distance_from_preferred'] = 0
+        f['day_distance_from_preferred'] = 2
 
         # ── COUNTERPARTY CONTRAST ──────────────────────────────
         try:
@@ -215,8 +248,7 @@ class EnrichmentService:
             arch = prof.get('archetype', 'salaried')
             for a in ARCHETYPES:
                 f[f'arch_{a}'] = 1 if arch == a else 0
-            opening = pd.Timestamp(prof.get('account_opening_date', '2025-01-01'))
-            f['account_age_days'] = (ts - opening).days
+            f['account_age_days'] = int(prof.get('account_age_days', 0))
         else:
             for a in ARCHETYPES:
                 f[f'arch_{a}'] = 0

@@ -9,7 +9,7 @@ import json
 
 from src.scoring.fusion import ScoreFusion
 from src.scoring.AEScorer import AEScorer
-from src.scoring.LSTMScorer import LSTMScorer
+from src.scoring.lstm_scorer import LSTMScorer
 from src.decision.decision import DecisionService, DecisionInput
 
 
