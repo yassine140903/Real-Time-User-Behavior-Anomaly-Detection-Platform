@@ -23,7 +23,7 @@ class EnrichmentCore:
 
     # ── PUBLIC API (single entry point) ─────────────────────────
 
-    def enrich_event(self, event: dict) -> dict:
+    def enrich_event(self, event: dict , dry_run: bool = False) -> dict:
         cid = event["client_id"]
         eid = event["employee_id"]
         ts = pd.Timestamp(event["timestamp"])
@@ -46,8 +46,11 @@ class EnrichmentCore:
         features["operation_type"] = op
         features["payload"] = event["payload"]
 
-        self._update_buffers(cid, eid, ts, amount, op, eid, event["payload"], cbuf, ebuf)
-        self._update_sequence(cid, features)
+        if not dry_run:
+            self._update_buffers(cid, eid, ts, amount, op, eid, event["payload"], cbuf, ebuf)
+            self._update_sequence(cid, features)
+
+
 
         return features
 

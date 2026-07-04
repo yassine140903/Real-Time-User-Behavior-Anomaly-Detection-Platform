@@ -1,0 +1,8 @@
+my_env/
+__pycache__/
+*.pyc
+data/
+models/
+.env
+.DS_Store
+.git/

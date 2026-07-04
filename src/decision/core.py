@@ -93,4 +93,6 @@ class DecisionCore:
         output["timestamp"] = scored["timestamp"]
         output["amount"] = scored["amount"]
         output["operation_type"] = scored["operation_type"]
+        output["ae_explanation"] = scored.get("ae_explanation")
+        output["lstm_explanation"] = scored.get("lstm_explanation")
         return output

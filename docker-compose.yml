@@ -28,6 +28,21 @@ services:
     volumes:
       - redis-data:/var/lib/redis/data
 
+  simulation-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: simulation-api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./models:/app/models
+
 volumes:
   redpanda-data:
   redis-data:
