@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   redpanda:
     image: redpandadata/redpanda:latest
@@ -28,6 +26,64 @@ services:
     volumes:
       - redis-data:/var/lib/redis/data
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=amen_anomaly
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  db-seed:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: db-seed
+    command: python -m scripts.load_postgresql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    volumes:
+      - ./data:/app/data
+    profiles:
+      - seed
+
+  hydrate-redis:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: hydrate-redis
+    command: python -m src.batch.hydrate_redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+
   simulation-api:
     build:
       context: .
@@ -36,13 +92,119 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - redis
+      hydrate-redis:
+        condition: service_completed_successfully
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
     volumes:
       - ./models:/app/models
 
+  enrichment-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: enrichment-service
+    command: python -m src.streaming.enrichment_service
+    ports:
+      - "9100:9100"
+    depends_on:
+      hydrate-redis:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_started
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BOOTSTRAP=redpanda:29092
+    volumes:
+      - ./models:/app/models
+
+  scoring-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: scoring-service
+    command: python -m src.streaming.scoring_service
+    ports:
+      - "9101:9101"
+    depends_on:
+      hydrate-redis:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_started
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BOOTSTRAP=redpanda:29092
+    volumes:
+      - ./models:/app/models
+
+  decision-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: decision-service
+    command: python -m src.streaming.decision_service
+    ports:
+      - "9102:9102"
+    depends_on:
+      hydrate-redis:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_started
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BOOTSTRAP=redpanda:29092
+    volumes:
+      - ./models:/app/models
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: kafka-exporter
+    command:
+      - "--kafka.server=redpanda:29092"
+    ports:
+      - "9308:9308"
+    depends_on:
+      - redpanda
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - kafka-exporter
+      - enrichment-service
+      - scoring-service
+      - decision-service
+
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: simulator
+    command: python -m src.streaming.simulator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - KAFKA_BOOTSTRAP=redpanda:29092
+    profiles:
+      - simulate
+
 volumes:
   redpanda-data:
   redis-data:
+  postgres-data:

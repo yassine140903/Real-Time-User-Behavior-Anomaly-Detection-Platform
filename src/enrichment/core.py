@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import redis
 from pathlib import Path
+import time
 
 OPS = ["retrait", "versement", "virement", "cheque"]
 ARCHETYPES = ["salaried", "small_business", "student", "retiree", "big_business"]
@@ -13,8 +14,10 @@ EMP_BUFFER_SIZE = 100
 
 
 class EnrichmentCore:
-    def __init__(self, redis_client: redis.Redis, models_dir: str = "models"):
+    def __init__(self, redis_client: redis.Redis, models_dir: str = "models",
+                 metrics=None):
         self.redis = redis_client
+        self.metrics = metrics
         models_path = Path(models_dir)
         with open(models_path / "feature_cols.json") as f:
             self.feature_cols = json.load(f)
@@ -23,36 +26,59 @@ class EnrichmentCore:
 
     # ── PUBLIC API (single entry point) ─────────────────────────
 
-    def enrich_event(self, event: dict , dry_run: bool = False) -> dict:
-        cid = event["client_id"]
-        eid = event["employee_id"]
-        ts = pd.Timestamp(event["timestamp"])
-        amount = float(event["amount"])
-        op = event["operation_type"]
+    def enrich_event(self, event: dict, dry_run: bool = False) -> dict:
+        start_time = time.monotonic()
 
-        profile = self._fetch_profile(cid)
-        cbuf, ebuf = self._fetch_buffers(cid, eid)
+        try:
+            cid = event["client_id"]
+            eid = event["employee_id"]
+            ts = pd.Timestamp(event["timestamp"])
+            amount = float(event["amount"])
+            op = event["operation_type"]
 
-        features = self._compute_features(event, profile, cbuf, ebuf, ts, amount, op, eid)
+            profile = self._fetch_profile(cid)
 
-        # Attach identifiers for downstream services
-        features["event_id"] = event["event_id"]
-        features["client_id"] = cid
-        features["account_id"] = event["account_id"]
-        features["employee_id"] = eid
-        features["branch_id"] = event["branch_id"]
-        features["timestamp"] = event["timestamp"]
-        features["amount"] = amount
-        features["operation_type"] = op
-        features["payload"] = event["payload"]
+            if profile is None and self.metrics:
+                self.metrics.errors.labels(error_class="data_gap").inc()
 
-        if not dry_run:
-            self._update_buffers(cid, eid, ts, amount, op, eid, event["payload"], cbuf, ebuf)
-            self._update_sequence(cid, features)
+            cbuf, ebuf = self._fetch_buffers(cid, eid)
 
+            features = self._compute_features(event, profile, cbuf, ebuf, ts, amount, op, eid)
 
+            features["event_id"] = event["event_id"]
+            features["client_id"] = cid
+            features["account_id"] = event["account_id"]
+            features["employee_id"] = eid
+            features["branch_id"] = event["branch_id"]
+            features["timestamp"] = event["timestamp"]
+            features["amount"] = amount
+            features["operation_type"] = op
+            features["payload"] = event["payload"]
 
-        return features
+            if not dry_run:
+                self._update_buffers(cid, eid, ts, amount, op, eid, event["payload"], cbuf, ebuf)
+                self._update_sequence(cid, features)
+
+            # Success
+            if self.metrics:
+                self.metrics.events_processed.labels(operation_type=op).inc()
+
+            return features
+
+        except redis.RedisError:
+            if self.metrics:
+                self.metrics.errors.labels(error_class="redis_failure").inc()
+            raise
+
+        except Exception:
+            if self.metrics:
+                self.metrics.errors.labels(error_class="logic_error").inc()
+            raise
+
+        finally:
+            if self.metrics:
+                duration = time.monotonic() - start_time
+                self.metrics.processing_duration.observe(duration)
 
     # ── PRIVATE: Data Access ────────────────────────────────────
 

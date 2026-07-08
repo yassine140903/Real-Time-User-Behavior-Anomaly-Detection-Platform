@@ -1,23 +1,46 @@
 # src/decision/core.py
 
 import json
+import time
+import redis
 from src.decision.decision import DecisionService, DecisionInput
 
 OPERATIONS = ["retrait", "versement", "virement", "cheque"]
 
 
 class DecisionCore:
-    def __init__(self, redis_client, engine: DecisionService):
+    def __init__(self, redis_client, engine: DecisionService, metrics=None):
         self.redis = redis_client
         self.engine = engine
+        self.metrics = metrics
 
     # ── PUBLIC API ──────────────────────────────────────────
 
     def decide_event(self, scored: dict) -> dict:
-        profile = self._fetch_profile(scored["client_id"])
-        inp = self._build_input(scored, profile)
-        decision = self.engine.decide(inp)
-        return self._build_output(scored, decision)
+        start_time = time.monotonic()
+
+        try:
+            profile = self._fetch_profile(scored["client_id"])
+            inp = self._build_input(scored, profile)
+            decision = self.engine.decide(inp)
+            output = self._build_output(scored, decision)
+
+            if self.metrics:
+                op = scored.get("operation_type", "unknown")
+                self.metrics.events_processed.labels(operation_type=op).inc()
+
+            return output
+
+        except Exception as e:
+            if self.metrics:
+                error_class = "redis_failure" if isinstance(e, redis.RedisError) else "logic_error"
+                self.metrics.errors.labels(error_class=error_class).inc()
+            raise
+
+        finally:
+            if self.metrics:
+                duration = time.monotonic() - start_time
+                self.metrics.processing_duration.observe(duration)
 
     # ── PRIVATE ─────────────────────────────────────────────
 

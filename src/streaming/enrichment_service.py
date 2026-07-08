@@ -54,13 +54,16 @@ class EnrichmentStreamingService:
         self.producer.close()
 
 
-
 if __name__ == '__main__':
     import redis
     from src.config import REDIS_HOST, REDIS_PORT
+    from src.monitoring.metrics import ServiceMetrics
+
+    metrics = ServiceMetrics("enrichment")
+    metrics.start_server(port=9100)
 
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-    core = EnrichmentCore(redis_client)
+    core = EnrichmentCore(redis_client, metrics=metrics)
     service = EnrichmentStreamingService(core)
 
     try:

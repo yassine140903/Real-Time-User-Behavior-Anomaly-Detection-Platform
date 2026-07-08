@@ -62,10 +62,14 @@ if __name__ == '__main__':
     import redis
     from src.config import REDIS_HOST, REDIS_PORT
     from src.decision.decision import DecisionService
+    from src.monitoring.metrics import ServiceMetrics
+
+    metrics = ServiceMetrics("decision")
+    metrics.start_server(port=9102)
 
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
     engine = DecisionService()
-    core = DecisionCore(redis_client, engine)
+    core = DecisionCore(redis_client, engine, metrics=metrics)
     service = DecisionStreamingService(core)
 
     try:

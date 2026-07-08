@@ -58,10 +58,14 @@ if __name__ == '__main__':
     import redis
     from src.config import REDIS_HOST, REDIS_PORT
     from src.scoring.fusion import ScoreFusion
+    from src.monitoring.metrics import ServiceMetrics
+
+    metrics = ServiceMetrics("scoring")
+    metrics.start_server(port=9101)
 
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
     fusion = ScoreFusion()
-    core = ScoringCore(redis_client, fusion)
+    core = ScoringCore(redis_client, fusion, metrics=metrics)
     service = ScoringStreamingService(core)
 
     try:

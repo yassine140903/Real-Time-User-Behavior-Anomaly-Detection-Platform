@@ -10,3 +10,5 @@ scikit-learn
 shap
 psycopg2-binary
 python-dotenv
+kafka-python
+prometheus_client

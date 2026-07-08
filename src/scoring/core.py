@@ -1,6 +1,8 @@
 # src/scoring/core.py
 
 import json
+import time
+import redis
 import numpy as np
 from pathlib import Path
 from src.scoring.ae_scorer import AEScorer
@@ -10,11 +12,11 @@ from src.scoring.lstm_scorer import LSTMScorer
 class ScoringCore:
     EXPLAIN_THRESHOLD = 0.95
 
-    def __init__(self, redis_client, fusion, models_dir="models"):
+    def __init__(self, redis_client, fusion, models_dir="models", metrics=None):
         self.redis = redis_client
         self.fusion = fusion
+        self.metrics = metrics
 
-        # Create scorers internally — tightly coupled to fusion
         background = np.load(Path(models_dir) / "shap_background.npy")
         self.ae_scorer = AEScorer(
             model=fusion.ae,
@@ -32,25 +34,48 @@ class ScoringCore:
     # ── PUBLIC API ──────────────────────────────────────────
 
     def score_event(self, enriched: dict) -> dict:
-        cid = enriched["client_id"]
+        start_time = time.monotonic()
 
-        features_scaled = self._extract_and_scale(enriched)
-        sequence_scaled = self._fetch_and_scale_sequence(cid)
-        days = enriched.get("account_age_days", 0)
+        try:
+            cid = enriched["client_id"]
 
-        result = self.fusion.score(features_scaled, sequence_scaled, days)
+            features_scaled = self._extract_and_scale(enriched)
+            sequence_scaled = self._fetch_and_scale_sequence(cid)
+            days = enriched.get("account_age_days", 0)
 
-        ae_explanation = None
-        lstm_explanation = None
-        if result["fused_score"] >= self.EXPLAIN_THRESHOLD:
-            ae_explanation = self.ae_scorer.explain(features_scaled)
-            if sequence_scaled is not None:
-                lstm_explanation = self.lstm_scorer.explain(
-                    sequence_scaled[-self.fusion.seq_len:],
-                    features_scaled
-                )
+            result = self.fusion.score(features_scaled, sequence_scaled, days)
 
-        return self._build_output(enriched, result, ae_explanation, lstm_explanation)
+            ae_explanation = None
+            lstm_explanation = None
+            if result["fused_score"] >= self.EXPLAIN_THRESHOLD:
+                ae_explanation = self.ae_scorer.explain(features_scaled)
+                if sequence_scaled is not None:
+                    lstm_explanation = self.lstm_scorer.explain(
+                        sequence_scaled[-self.fusion.seq_len:],
+                        features_scaled
+                    )
+
+            output = self._build_output(enriched, result, ae_explanation, lstm_explanation)
+
+            # Success
+            if self.metrics:
+                op = enriched.get("operation_type", "unknown")
+                self.metrics.events_processed.labels(operation_type=op).inc()
+                self.metrics.fused_score.observe(result["fused_score"])
+
+            return output
+        
+        except Exception as e:
+                    if self.metrics:
+                        error_class = "redis_failure" if isinstance(e, redis.RedisError) else "logic_error"
+                        self.metrics.errors.labels(error_class=error_class).inc()
+                    raise
+
+        finally:
+            if self.metrics:
+                duration = time.monotonic() - start_time
+                self.metrics.processing_duration.observe(duration)
+
 
     # ── PRIVATE ─────────────────────────────────────────────
 
