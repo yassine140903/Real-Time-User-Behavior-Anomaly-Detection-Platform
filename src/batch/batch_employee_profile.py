@@ -313,7 +313,8 @@ def run_batch(conn):
         cur = conn.cursor()
         psycopg2.extras.execute_values(
             cur,
-            "INSERT INTO employee_profile_snapshots (employee_id, computed_at, profile_data) VALUES %s",
+            "INSERT INTO employee_profile_snapshots (employee_id, computed_at, profile_data) VALUES %s "
+            "ON CONFLICT (employee_id, computed_at) DO UPDATE SET profile_data = EXCLUDED.profile_data",
             snapshot_profiles,
             template="(%s, %s, %s::jsonb)"
         )

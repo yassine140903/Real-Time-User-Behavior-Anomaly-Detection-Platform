@@ -60,7 +60,8 @@ def compute_archetype_baselines(conn):
     cur = conn.cursor()
     for archetype, baseline in baselines.items():
         cur.execute(
-            "INSERT INTO archetype_baselines (archetype, baseline_data) VALUES (%s, %s::jsonb)",
+            "INSERT INTO archetype_baselines (archetype, baseline_data) VALUES (%s, %s::jsonb) "
+            "ON CONFLICT (archetype) DO UPDATE SET baseline_data = EXCLUDED.baseline_data",
             (archetype, json.dumps(baseline))
         )
     conn.commit()

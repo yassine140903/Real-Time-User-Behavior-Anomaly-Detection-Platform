@@ -43,7 +43,12 @@ class EnrichmentCore:
 
             cbuf, ebuf = self._fetch_buffers(cid, eid)
 
-            features = self._compute_features(event, profile, cbuf, ebuf, ts, amount, op, eid)
+            arch = profile.get("archetype", "salaried") if profile else "salaried"
+            baseline_raw = self.redis.get(f"baseline:{arch}")
+            archetype_baseline = json.loads(baseline_raw) if baseline_raw else None
+
+            features = self._compute_features(event, profile, cbuf, ebuf, ts, amount, op, eid,
+                                               archetype_baseline=archetype_baseline)
 
             features["event_id"] = event["event_id"]
             features["client_id"] = cid
@@ -138,7 +143,7 @@ class EnrichmentCore:
 
     # ── PRIVATE: Feature Computation ───────────────────────────
 
-    def _compute_features(self, row, prof, cbuf, ebuf, ts, amount, op, eid):
+    def _compute_features(self, row, prof, cbuf, ebuf, ts, amount, op, eid, archetype_baseline=None):
         f = {}
 
         # ── RAW EVENT ──────────────────────────────────────────
@@ -165,12 +170,9 @@ class EnrichmentCore:
                     p_mean = float(prof.get(f"tx_{op}_90d_mean", amount))
                     p_std = float(prof.get(f"tx_{op}_90d_std", 1.0))
                 else:
-                    arch = prof.get("archetype", "salaried")
-                    baseline_data = self.redis.get(f"baseline:{arch}")
-                    if baseline_data:
-                        baseline = json.loads(baseline_data)
-                        p_mean = float(baseline.get(f"amount_{op}_mean", amount))
-                        p_std = float(baseline.get(f"amount_{op}_std", 1.0))
+                    if archetype_baseline:
+                        p_mean = float(archetype_baseline.get(f"amount_{op}_mean", amount))
+                        p_std = float(archetype_baseline.get(f"amount_{op}_std", 1.0))
                     else:
                         p_mean = amount
                         p_std = 1.0

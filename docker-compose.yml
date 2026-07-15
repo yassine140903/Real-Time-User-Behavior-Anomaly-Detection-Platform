@@ -1,3 +1,33 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  environment:
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://postgres:postgres@postgres:5432/amen_anomaly
+    - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW_FERNET_KEY:-}
+    - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    - AIRFLOW__CORE__DAGS_FOLDER=/app/dags
+    - AIRFLOW__WEBSERVER__SECRET_KEY=amen_bank_airflow_secret_key_2025
+    - PYTHONPATH=/app
+    - REDIS_HOST=redis
+    - REDIS_PORT=6379
+    - DB_HOST=postgres
+    - DB_PORT=5432
+    - DB_NAME=amen_anomaly
+    - DB_USER=postgres
+    - DB_PASSWORD=postgres
+  volumes:
+    - .:/app
+    - ./dags:/app/dags
+    - ./models:/app/models
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+
 services:
   redpanda:
     image: redpandadata/redpanda:latest
@@ -252,7 +282,41 @@ services:
     profiles:
       - simulate
 
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash -c
+    command:
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: airflow webserver --port 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: airflow scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   redpanda-data:
   redis-data:
   postgres-data:
+  airflow-logs:

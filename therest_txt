@@ -1,0 +1,10 @@
+Here's the full picture, roughly in priority order:
+
+Streamlit dashboard — now unblocked. Reads alerts from PostgreSQL, pipeline health from Prometheus, SHAP explanations, KPIs, simulation mode, supervisor feedback
+Model retraining — retrain AE and LSTM on the new 30-feature training dataset to close the feature alignment gap
+MLflow — model versioning and experiment tracking, wired into the retrain_models placeholder in the weekly DAG
+Streaming/Airflow coordination — pause streaming consumers before batch runs, resume after hydration completes. Prevents state corruption from mid-flight Redis overwrites
+Dead letter queue — malformed events, missing profiles, failed inserts get routed to a DLQ topic instead of silently dropped or crashing the consumer
+Feedback loop — supervisor decisions from the dashboard write to evaluation_labels, feeding back into the retraining pipeline
+Structured JSON logging — replace print statements across all services for centralized log aggregation
+Document-only (production roadmap): Kubernetes, CI/CD, secrets management, load testing, data retention
