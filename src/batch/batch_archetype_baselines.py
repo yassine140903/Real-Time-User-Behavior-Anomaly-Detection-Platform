@@ -3,14 +3,7 @@ import psycopg2.extras
 import pandas as pd
 import numpy as np
 import json
-
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "amen_anomaly",
-    "user": "postgres",
-    "password": "9011361923257228",
-}
+from src.config import DB_CONFIG
 
 OPERATIONS = ["retrait", "versement", "virement", "cheque"]
 

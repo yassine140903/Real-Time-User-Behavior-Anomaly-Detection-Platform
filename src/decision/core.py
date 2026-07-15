@@ -13,6 +13,8 @@ class DecisionCore:
         self.redis = redis_client
         self.engine = engine
         self.metrics = metrics
+        with open("models/feature_cols.json") as f:
+            self.feature_cols = json.load(f)
 
     # ── PUBLIC API ──────────────────────────────────────────
 
@@ -118,4 +120,5 @@ class DecisionCore:
         output["operation_type"] = scored["operation_type"]
         output["ae_explanation"] = scored.get("ae_explanation")
         output["lstm_explanation"] = scored.get("lstm_explanation")
+        output["enriched_features"] = {col: scored.get(col, 0.0) for col in self.feature_cols}
         return output

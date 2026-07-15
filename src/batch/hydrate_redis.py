@@ -2,7 +2,7 @@ import json
 import psycopg2
 import psycopg2.extras
 import redis
-from src.config import DB_CONFIG, KAFKA_BOOTSTRAP
+from src.config import DB_CONFIG, KAFKA_BOOTSTRAP, REDIS_HOST, REDIS_PORT
 
 class ProfileHydrator:
     def __init__(self, db_config, redis_host='localhost', redis_port=6379):
@@ -146,7 +146,7 @@ class ProfileHydrator:
 
 if __name__ == '__main__':
     
-    hydrator = ProfileHydrator(db_config=DB_CONFIG)
+    hydrator = ProfileHydrator(db_config=DB_CONFIG, redis_host=REDIS_HOST, redis_port=REDIS_PORT)
     try:
         hydrator.run()
     finally:

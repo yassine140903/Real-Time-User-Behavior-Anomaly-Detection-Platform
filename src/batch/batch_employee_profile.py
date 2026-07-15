@@ -4,14 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import json
-
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "amen_anomaly",
-    "user": "postgres",
-    "password": "9011361923257228",
-}
+from src.config import DB_CONFIG
 
 SIM_START = datetime(2025, 1, 1)
 SIM_END = datetime(2025, 6, 29)

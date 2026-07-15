@@ -2,6 +2,7 @@
 -- FULL RESET: drop everything, rebuild clean
 -- ============================================
 
+DROP TABLE IF EXISTS evaluation_labels CASCADE;
 DROP TABLE IF EXISTS alerts CASCADE;
 DROP TABLE IF EXISTS peer_baselines CASCADE;
 DROP TABLE IF EXISTS archetype_baselines CASCADE;
@@ -53,13 +54,21 @@ CREATE TABLE transactions (
     currency          VARCHAR(3) DEFAULT 'TND',
     channel           VARCHAR(10) DEFAULT 'guichet',
     operation_type    VARCHAR(20) NOT NULL,
-    payload           JSONB,
-    is_anomaly        BOOLEAN DEFAULT FALSE,
-    anomaly_type      VARCHAR(30)
+    payload           JSONB
 );
 
 CREATE INDEX idx_tx_client_time ON transactions(client_id, timestamp);
 CREATE INDEX idx_tx_employee_time ON transactions(employee_id, timestamp);
+
+-- ============================================
+-- Evaluation labels (batch-only, FK safe)
+-- ============================================
+
+CREATE TABLE evaluation_labels (
+    event_id      UUID PRIMARY KEY REFERENCES transactions(event_id),
+    is_anomaly    BOOLEAN NOT NULL,
+    anomaly_type  VARCHAR(30)
+);
 
 -- ============================================
 -- Profile / snapshot tables
@@ -92,19 +101,38 @@ CREATE TABLE peer_baselines (
 );
 
 -- ============================================
--- Alerts (populated by Decision Service)
+-- Alerts (populated by decisions sink consumer)
+--
+-- NOTE: No FK to transactions(event_id).
+-- In the streaming path, the raw-events sink and decisions sink
+-- consume from different topics in parallel. A FK would create
+-- a race condition: the decisions sink may arrive before the
+-- raw-events sink inserts the transaction row.
+-- Referential integrity is guaranteed by pipeline topology —
+-- a decision event cannot exist without a corresponding raw event
+-- having entered the pipeline.
 -- ============================================
 
 CREATE TABLE alerts (
-    alert_id          UUID PRIMARY KEY,
-    event_id          UUID REFERENCES transactions(event_id),
-    client_id         UUID REFERENCES clients_master(client_id),
-    employee_id       VARCHAR(10) REFERENCES employees_master(employee_id),
-    timestamp         TIMESTAMP NOT NULL,
-    severity_tier     VARCHAR(10) NOT NULL,
-    anomaly_score     NUMERIC(6,4),
-    shap_explanation  JSONB,
+    event_id            UUID PRIMARY KEY,
+    client_id           UUID,
+    employee_id         VARCHAR(10),
+    branch_id           VARCHAR(10),
+    timestamp           TIMESTAMP NOT NULL,
+    amount              NUMERIC(12,2) NOT NULL,
+    operation_type      VARCHAR(20) NOT NULL,
+    tier                VARCHAR(10) NOT NULL,
+    fused_score         NUMERIC(8,6),
+    reasons             JSONB,
+    regulatory_flags    JSONB,
+    explanation         JSONB,
     supervisor_decision VARCHAR(10) DEFAULT 'pending',
-    supervisor_notes  TEXT,
-    decision_timestamp TIMESTAMP
+    supervisor_notes    TEXT,
+    decision_timestamp  TIMESTAMP,
+    created_at          TIMESTAMP DEFAULT NOW()
 );
+
+CREATE INDEX idx_alerts_branch ON alerts(branch_id);
+CREATE INDEX idx_alerts_tier ON alerts(tier);
+CREATE INDEX idx_alerts_timestamp ON alerts(timestamp);
+CREATE INDEX idx_alerts_operation ON alerts(operation_type);

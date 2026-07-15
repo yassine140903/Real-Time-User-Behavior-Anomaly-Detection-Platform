@@ -30,18 +30,20 @@ class EventSimulator:
         # PostgreSQL connection
         self.conn = psycopg2.connect(**db_config)
     
-    def load_events(self, limit=None):
+    def load_events(self, limit=None, offset=None):
         cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         query = "SELECT * FROM transactions ORDER BY timestamp ASC"
         if limit:
             query += f" LIMIT {limit}"
+        if offset:
+            query += f" OFFSET {offset}"
         cursor.execute(query)
         events = cursor.fetchall()
         cursor.close()
         return events
     
-    def run(self, limit=None):
-        events = self.load_events(limit)
+    def run(self, limit=None, offset=None):
+        events = self.load_events(limit, offset)
         print(f"Loaded {len(events)} events from PostgreSQL")
         
         prev_ts = None
@@ -102,10 +104,12 @@ class EventSimulator:
 
 
 if __name__ == '__main__':
-    
-    sim = EventSimulator(db_config=DB_CONFIG, kafka_bootstrap=KAFKA_BOOTSTRAP)
-    
+    sim = EventSimulator(db_config=DB_CONFIG, kafka_bootstrap=KAFKA_BOOTSTRAP, burst_mode=True, burst_delay_ms=10)
     try:
-        sim.run(limit=500)  
+        
+        sim.run(limit=500, offset=200000)
     finally:
         sim.close()
+
+
+        

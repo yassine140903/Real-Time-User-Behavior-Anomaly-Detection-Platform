@@ -58,10 +58,14 @@ def main():
     tx_cols = [
         "event_id", "client_id", "account_id", "employee_id",
         "branch_id", "timestamp", "amount", "currency", "channel",
-        "operation_type", "payload", "is_anomaly", "anomaly_type"
+        "operation_type", "payload"
     ]
     tx = tx_df[tx_cols].copy()
     copy_df(conn, tx, "transactions")
+
+    print("Loading evaluation_labels...")
+    labels = tx_df[["event_id", "is_anomaly", "anomaly_type"]].copy()
+    copy_df(conn, labels, "evaluation_labels")
 
     conn.close()
     print("\nDone!")

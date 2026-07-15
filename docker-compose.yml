@@ -160,6 +160,52 @@ services:
     volumes:
       - ./models:/app/models
 
+  raw-events-sink:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: raw-events-sink
+    command: python -m src.streaming.sinks.raw_events_sink
+    ports:
+      - "9103:9103"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - KAFKA_BOOTSTRAP=redpanda:29092
+
+  decisions-sink:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: decisions-sink
+    command: python -m src.streaming.sinks.decisions_sink
+    ports:
+      - "9104:9104"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BOOTSTRAP=redpanda:29092
+
   kafka-exporter:
     image: danielqsj/kafka-exporter:latest
     container_name: kafka-exporter
@@ -182,6 +228,8 @@ services:
       - enrichment-service
       - scoring-service
       - decision-service
+      - raw-events-sink
+      - decisions-sink
 
   simulator:
     build:

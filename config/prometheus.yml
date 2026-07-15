@@ -1,21 +1,47 @@
-# config/prometheus.yml
+raw-events-sink:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: raw-events-sink
+    command: python -m src.streaming.sinks.raw_events_sink
+    ports:
+      - "9103:9103"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - KAFKA_BOOTSTRAP=redpanda:29092
 
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: "enrichment"
-    static_configs:
-      - targets: ["enrichment-service:9100"]
-
-  - job_name: "scoring"
-    static_configs:
-      - targets: ["scoring-service:9101"]
-
-  - job_name: "decision"
-    static_configs:
-      - targets: ["decision-service:9102"]
-
-  - job_name: "kafka-exporter"
-    static_configs:
-      - targets: ["kafka-exporter:9308"]
+  decisions-sink:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: decisions-sink
+    command: python -m src.streaming.sinks.decisions_sink
+    ports:
+      - "9104:9104"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BOOTSTRAP=redpanda:29092
+    volumes:
+      - ./models:/app/models
