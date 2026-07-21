@@ -314,6 +314,26 @@ services:
       airflow-init:
         condition: service_completed_successfully
     restart: unless-stopped
+  
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - API_URL=http://simulation-api:8000/api/v1
+      - PROMETHEUS_URL=http://prometheus:9090
 
 volumes:
   redpanda-data:

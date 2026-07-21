@@ -1,0 +1,47 @@
+Before the presentation (do this 10 min early):
+powershell# Check what's already running
+docker compose ps
+
+# If postgres/redis/airflow are already up from today, you're good
+# If not, start everything:
+docker compose up -d
+During Part 5 — Demo commands:
+powershell# Show all 17 services running
+docker compose ps
+
+# Show Airflow UI
+# Open browser: http://localhost:8080 (admin/admin)
+
+# Trigger weekly_retrain manually from the UI (play button)
+# While it runs, show the logs by clicking on the task
+
+# FastAPI simulation — open a second terminal:
+# Test 1: Large versement (should return BLOCK + BCT flag)
+curl -X POST http://localhost:8000/score -H "Content-Type: application/json" -d "{\"client_id\": \"any-uuid-from-db\", \"account_id\": \"matching-account-uuid\", \"employee_id\": \"EMP-0001\", \"branch_id\": \"BR-001\", \"timestamp\": \"2025-06-15T10:30:00\", \"amount\": 15000, \"currency\": \"TND\", \"channel\": \"guichet\", \"operation_type\": \"versement\", \"payload\": {\"depositor_id\": null}}"
+Important: PowerShell doesn't have curl the same way. Use this instead:
+powershell# PowerShell version
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/score" -ContentType "application/json" -Body '{"client_id":"any-uuid","account_id":"any-uuid","employee_id":"EMP-0001","branch_id":"BR-001","timestamp":"2025-06-15T10:30:00","amount":15000,"currency":"TND","channel":"guichet","operation_type":"versement","payload":{"depositor_id":null}}'
+But for the demo, you need real UUIDs from your database. Grab them now:
+powershell# Get a real client_id and account_id pair
+docker exec -it postgres psql -U postgres -d amen_anomaly -c "SELECT c.client_id, a.account_id FROM clients_master c JOIN accounts a ON c.client_id = a.client_id LIMIT 1;"
+Paste those UUIDs into the simulation request. Prepare the command in a text file before the presentation so you just copy-paste during the demo — no typing under pressure.
+
+If memory is tight, only start what you need to show:
+powershell# Minimal demo setup (Airflow + simulation API only)
+
+docker compose up -d postgres redis airflow-webserver airflow-scheduler simulation-api
+That's 5 services instead of 17 — much lighter. You can still show Airflow DAGs and the simulation API.
+
+
+
+
+
+{
+  "client_id": "347b6bba-94c3-418e-88d3-7938616df78a",
+  "employee_id": "EMP-0001",
+  "amount": 15000,
+  "operation_type": "versement",
+  "payload": null
+}
+
+

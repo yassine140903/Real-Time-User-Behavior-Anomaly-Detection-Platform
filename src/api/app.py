@@ -11,7 +11,9 @@ from src.scoring.fusion import ScoreFusion
 from src.decision.core import DecisionCore
 from src.decision.decision import DecisionService
 from src.api.routes import router
-
+import psycopg2
+from psycopg2 import pool
+import os 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -23,6 +25,15 @@ async def lifespan(app: FastAPI):
     engine = DecisionService()
 
     app.state.redis = r
+    app.state.pg_pool = pool.SimpleConnectionPool(
+        minconn=1,
+        maxconn=5,
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", 5432)),
+        dbname=os.getenv("DB_NAME", "amen_anomaly"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "postgres"),
+    )
     app.state.enrichment_core = EnrichmentCore(redis_client=r, models_dir=str(models_dir))
     app.state.scoring_core = ScoringCore(redis_client=r, fusion=fusion, models_dir=str(models_dir))
     app.state.decision_core = DecisionCore(redis_client=r, engine=engine)
@@ -31,6 +42,7 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown: clean up ──────────────────────────────
     r.close()
+    app.state.pg_pool.closeall()
 
 
 app = FastAPI(

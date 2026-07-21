@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements-dashboard.txt .
+RUN pip install --no-cache-dir -r requirements-dashboard.txt
+
+COPY src/dashboard/ ./src/dashboard/
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "src/dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501"]

@@ -4,7 +4,11 @@ import uuid
 import json
 from datetime import datetime
 from fastapi import APIRouter, Request
-from src.api.models import SimulationRequest, SimulationResponse, OperationType
+from src.api.models import SimulationRequest, SimulationResponse, OperationType, FeedbackRequest
+from fastapi import APIRouter, Request, HTTPException
+from datetime import datetime, timezone
+
+
 
 router = APIRouter()
 
@@ -48,3 +52,44 @@ def simulate_score(req: SimulationRequest, request: Request):
     decision = state.decision_core.decide_event(scored)
 
     return decision
+
+@router.post("/feedback")
+def submit_feedback(req: FeedbackRequest, request: Request):
+    conn = request.app.state.pg_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            # Update the alert
+            cur.execute("""
+                UPDATE alerts 
+                SET supervisor_decision = %s,
+                    supervisor_notes = %s,
+                    decision_timestamp = %s
+                WHERE event_id = %s
+            """, (req.decision, req.comment, datetime.now(timezone.utc), req.alert_id))
+            
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="Alert not found")
+            
+            # Insert into evaluation_labels for retraining feedback
+            cur.execute("""
+                INSERT INTO evaluation_labels (event_id, is_anomaly, anomaly_type)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (event_id) DO UPDATE
+                SET is_anomaly = EXCLUDED.is_anomaly,
+                    anomaly_type = EXCLUDED.anomaly_type
+            """, (
+                req.alert_id,
+                req.decision == "confirmed",
+                "supervisor_confirmed" if req.decision == "confirmed" else None
+            ))
+            
+            conn.commit()
+        return {"status": "ok", "event_id": req.alert_id, "decision": req.decision}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        request.app.state.pg_pool.putconn(conn)

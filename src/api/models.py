@@ -3,7 +3,7 @@
 from typing import Optional, Union
 from pydantic import BaseModel, model_validator
 from enum import Enum
-
+from typing import Literal
 
 class OperationType(str, Enum):
     retrait = "retrait"
@@ -70,3 +70,9 @@ class SimulationResponse(BaseModel):
     # Explainability
     ae_explanation: Optional[dict] = None
     lstm_explanation: Optional[dict] = None
+
+
+class FeedbackRequest(BaseModel):
+    event_id: str  # UUID as string, matches event_id in alerts
+    decision: Literal["confirmed", "rejected"]
+    comment: Optional[str] = None
