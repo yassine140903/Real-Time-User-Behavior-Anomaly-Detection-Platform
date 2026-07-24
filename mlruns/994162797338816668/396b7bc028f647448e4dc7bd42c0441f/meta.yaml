@@ -1,0 +1,15 @@
+artifact_uri: file:///mlflow/mlruns/994162797338816668/396b7bc028f647448e4dc7bd42c0441f/artifacts
+end_time: 1784893338222
+entry_point_name: ''
+experiment_id: '994162797338816668'
+lifecycle_stage: active
+run_id: 396b7bc028f647448e4dc7bd42c0441f
+run_name: autoencoder
+run_uuid: 396b7bc028f647448e4dc7bd42c0441f
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1784893286147
+status: 3
+tags: []
+user_id: root

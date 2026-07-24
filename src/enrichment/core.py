@@ -227,11 +227,14 @@ class EnrichmentCore:
         f["tx_count_7d"] = len(recent_7d)
         f["cumulative_amount_24h"] = sum(e["amount"] for e in recent_24h)
 
-        has_dup = 0
-        for e in recent_24h:
-            if e["op"] == op and abs(e["amount"] - amount) / max(amount, 1) < 0.10:
-                has_dup = 1
-                break
+        if len(cbuf) < 5:
+            has_dup = 0
+        else:
+            has_dup = 0
+            for e in recent_24h:
+                if e["op"] == op and abs(e["amount"] - amount) / max(amount, 1) < 0.10:
+                    has_dup = 1
+                    break
         f["has_duplicate_recent"] = has_dup
 
         f["near_threshold_count_7d"] = sum(

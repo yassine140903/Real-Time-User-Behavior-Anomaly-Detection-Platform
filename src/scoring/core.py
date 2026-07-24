@@ -39,6 +39,18 @@ class ScoringCore:
         try:
             cid = enriched["client_id"]
 
+            # ── Cold-start guard ──────────────────────────────
+            buf_raw = self.redis.get(f"sequence:client:{cid}")
+            buf_len = len(json.loads(buf_raw)) if buf_raw else 0
+            if buf_len < 5:
+                output = self._build_cold_start_output(enriched, buf_len)
+                if self.metrics:
+                    op = enriched.get("operation_type", "unknown")
+                    self.metrics.events_processed.labels(operation_type=op).inc()
+                    self.metrics.fused_score.observe(0.5)
+                return output
+
+            # ── Normal scoring path ───────────────────────────
             features_scaled = self._extract_and_scale(enriched)
             sequence_scaled = self._fetch_and_scale_sequence(cid)
             days = enriched.get("account_age_days", 0)
@@ -57,19 +69,18 @@ class ScoringCore:
 
             output = self._build_output(enriched, result, ae_explanation, lstm_explanation)
 
-            # Success
             if self.metrics:
                 op = enriched.get("operation_type", "unknown")
                 self.metrics.events_processed.labels(operation_type=op).inc()
                 self.metrics.fused_score.observe(result["fused_score"])
 
             return output
-        
+
         except Exception as e:
-                    if self.metrics:
-                        error_class = "redis_failure" if isinstance(e, redis.RedisError) else "logic_error"
-                        self.metrics.errors.labels(error_class=error_class).inc()
-                    raise
+            if self.metrics:
+                error_class = "redis_failure" if isinstance(e, redis.RedisError) else "logic_error"
+                self.metrics.errors.labels(error_class=error_class).inc()
+            raise
 
         finally:
             if self.metrics:
@@ -125,4 +136,42 @@ class ScoringCore:
             # Conditional explanations
             "ae_explanation": ae_explanation,
             "lstm_explanation": lstm_explanation,
+        }
+
+    def _build_cold_start_output(self, enriched, buf_len):
+        return {
+            # Pass-through identifiers
+            "event_id": enriched["event_id"],
+            "client_id": enriched["client_id"],
+            "account_id": enriched["account_id"],
+            "employee_id": enriched["employee_id"],
+            "branch_id": enriched["branch_id"],
+            "timestamp": enriched["timestamp"],
+            "amount": enriched["amount"],
+            "operation_type": enriched["operation_type"],
+
+            # Pass-through features (still forwarded — DecisionCore may need them)
+            "z_amount": enriched.get("z_amount", 0.0),
+            "tx_count_24h": enriched.get("tx_count_24h", 0),
+            "cumulative_amount_24h": enriched.get("cumulative_amount_24h", 0.0),
+            "near_threshold_count_7d": enriched.get("near_threshold_count_7d", 0),
+            "same_employee_client_count_24h": enriched.get("same_employee_client_count_24h", 0),
+            "is_new_counterparty": enriched.get("is_new_counterparty", 0),
+            "is_round_amount": enriched.get("is_round_amount", 0),
+            "has_duplicate_recent": enriched.get("has_duplicate_recent", 0),
+            "account_age_days": enriched.get("account_age_days", 0),
+
+            # Neutral scores
+            "ae_pct": 0.5,
+            "lstm_pct": 0.5,
+            "fused_score": 0.5,
+            "w_lstm": 0.0,
+
+            # No explanations
+            "ae_explanation": None,
+            "lstm_explanation": None,
+
+            # Cold-start flag
+            "cold_start": True,
+            "buffer_length": buf_len,
         }

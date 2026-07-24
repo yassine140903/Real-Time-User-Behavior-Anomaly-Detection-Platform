@@ -2,12 +2,27 @@
 
 from datetime import datetime, timedelta
 
+from docker.types import Mount
+
 from airflow import DAG
 from airflow.exceptions import AirflowFailException
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
+from airflow.providers.docker.operators.docker import DockerOperator
 
 APP_DIR = "/app"
+
+# Project root on the HOST machine (not inside the airflow container).
+# DockerOperator talks to the host Docker daemon via the mounted socket, so bind-mount
+# sources must be host paths, not the /app path this container sees them at.
+# Set this to the actual project directory on the host running docker-compose.
+PROJECT_DIR = r"C:\Users\benje\Iter\Real-Time-User-Behavior-Anomaly-Detection-Platform"
+
+# Docker Compose network name so the training container can reach `postgres`.
+# Compose names it "{project_folder}_default" by default (lowercased). For this
+# repo's folder that's "real-time-user-behavior-anomaly-detection-platform_default" —
+# update if COMPOSE_PROJECT_NAME is overridden on the host.
+COMPOSE_NETWORK = "real-time-user-behavior-anomaly-detection-platform_default"
 
 default_args = {
     "retries": 1,
@@ -68,9 +83,26 @@ with DAG(
         python_callable=validate_enrichment,
     )
 
-    retrain_models = BashOperator(
+    retrain_models = DockerOperator(
         task_id="retrain_models",
-        bash_command='echo "Placeholder: retrain AE + LSTM"',
+        image="amen-anomaly-training:latest",
+        force_pull=False,
+        command="python -m src.training.train_all",
+        docker_url="unix://var/run/docker.sock",
+        network_mode=COMPOSE_NETWORK,
+        auto_remove=True,
+        mounts=[
+            Mount(source=f"{PROJECT_DIR}/data", target="/app/data", type="bind"),
+            Mount(source=f"{PROJECT_DIR}/models", target="/app/models", type="bind"),
+        ],
+        mount_tmp_dir=False,
+        environment={
+            "DB_HOST": "postgres",
+            "DB_PORT": "5432",
+            "DB_NAME": "amen_anomaly",
+            "DB_USER": "postgres",
+            "DB_PASSWORD": "postgres",
+        },
     )
 
     run_batch_enrichment >> validate_enrichment_task >> retrain_models

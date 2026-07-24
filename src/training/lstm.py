@@ -27,7 +27,7 @@ def build_sequences(df, feature_cols, seq_len=10):
         sequences: np.array (N, seq_len, n_features)
         targets:   np.array (N, n_features)
         meta:      DataFrame with day_offset, is_anomaly, anomaly_type,
-                   difficulty, client_id for each target event
+                   client_id for each target event
     """
     sequences = []
     targets = []
@@ -53,7 +53,6 @@ def build_sequences(df, feature_cols, seq_len=10):
                 "day_offset": row["day_offset"],
                 "is_anomaly": row["is_anomaly"],
                 "anomaly_type": row.get("anomaly_type"),
-                "difficulty": row.get("difficulty"),
                 "client_id": client_id,
             })
 
@@ -196,6 +195,8 @@ def train(data, seq_len=10, hidden_dim=64, num_layers=2,
     print("Saved LSTM model + config to models/")
 
     return model, {
+        "X_train_seq": X_train_seq,
+        "Y_train": Y_train,
         "X_test_seq": X_test_seq,
         "Y_test": Y_test,
         "y_test_labels": y_test_labels,
@@ -203,20 +204,28 @@ def train(data, seq_len=10, hidden_dim=64, num_layers=2,
     }
 
 
+# ── Scoring ──────────────────────────────────────────────────────────
+
+def compute_scores(model, sequences, targets):
+    """Prediction error (per-sample MSE) for a batch of sequences/targets."""
+    seq_t = sequences if isinstance(sequences, torch.Tensor) else torch.FloatTensor(sequences)
+    tgt_t = targets if isinstance(targets, torch.Tensor) else torch.FloatTensor(targets)
+    model.eval()
+    with torch.no_grad():
+        pred = model(seq_t)
+        scores = (pred - tgt_t).pow(2).mean(dim=1).numpy()
+    return scores
+
+
 # ── Evaluation ───────────────────────────────────────────────────────
 
 def evaluate(model, test_data):
     """Evaluate LSTM on test set with per-scenario breakdown."""
 
-    X_test_seq    = test_data["X_test_seq"]
-    Y_test        = test_data["Y_test"]
     y_test_labels = test_data["y_test_labels"]
     test_meta     = test_data["test_meta"]
 
-    model.eval()
-    with torch.no_grad():
-        pred = model(X_test_seq)
-        scores = (pred - Y_test).pow(2).mean(dim=1).numpy()
+    scores = compute_scores(model, test_data["X_test_seq"], test_data["Y_test"])
 
     test_auc = roc_auc_score(y_test_labels, scores)
     print(f"\n{'='*40}")
@@ -229,14 +238,14 @@ def evaluate(model, test_data):
     normal_mask = test_meta["is_anomaly"] == False
 
     print(f"\nPer-scenario AUC (test set):")
-    print(f"  {'Scenario':<30s}  {'AUC':>6s}  {'Count':>5s}  {'Difficulty'}")
+    print(f"  {'Scenario':<30s}  {'AUC':>6s}  {'Count':>5s}")
     print(f"  {'-'*65}")
 
     anom = test_meta[test_meta["is_anomaly"] == True]
     if len(anom) > 0:
-        groups = anom.groupby(["anomaly_type", "difficulty"]).size().reset_index(name="count")
+        groups = anom.groupby("anomaly_type").size().reset_index(name="count")
         for _, row in groups.iterrows():
-            atype, diff, count = row["anomaly_type"], row["difficulty"], row["count"]
+            atype, count = row["anomaly_type"], row["count"]
             anom_mask = test_meta["anomaly_type"] == atype
             subset = test_meta[anom_mask | normal_mask]
             y_sub = subset["is_anomaly"].values.astype(int)
@@ -245,20 +254,7 @@ def evaluate(model, test_data):
                 auc = roc_auc_score(y_sub, s_sub)
             else:
                 auc = float("nan")
-            print(f"  {atype:<30s}  {auc:>6.4f}  {count:>5d}  {diff}")
-
-    # Per-difficulty
-    print(f"\nPer-difficulty AUC:")
-    for diff in ["easy", "medium", "hard"]:
-        diff_mask = test_meta["difficulty"] == diff
-        if diff_mask.sum() == 0:
-            continue
-        subset = test_meta[diff_mask | normal_mask]
-        y_sub = subset["is_anomaly"].values.astype(int)
-        s_sub = subset["score"].values
-        auc = (roc_auc_score(y_sub, s_sub)
-               if 0 < y_sub.sum() < len(y_sub) else float("nan"))
-        print(f"  {diff:<10s}  AUC={auc:.4f}  n={int(diff_mask.sum())}")
+            print(f"  {atype:<30s}  {auc:>6.4f}  {count:>5d}")
 
     # Score distribution
     print(f"\nScore distribution:")

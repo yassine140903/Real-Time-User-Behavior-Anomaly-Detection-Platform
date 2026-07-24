@@ -17,6 +17,7 @@ x-airflow-common: &airflow-common
     - DB_NAME=amen_anomaly
     - DB_USER=postgres
     - DB_PASSWORD=postgres
+    - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
   volumes:
     - .:/app
     - ./dags:/app/dags
@@ -91,6 +92,7 @@ services:
       - DB_PASSWORD=postgres
     volumes:
       - ./data:/app/data
+      - ./src:/app/src
     profiles:
       - seed
 
@@ -99,7 +101,7 @@ services:
       context: .
       dockerfile: Dockerfile.api
     container_name: hydrate-redis
-    command: python -m src.batch.hydrate_redis
+    command: python -m src.batch.hydrate_redis --skip-buffers
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,22 +115,30 @@ services:
       - DB_PASSWORD=postgres
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+    volumes:
+      - ./src:/app/src
 
   simulation-api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: simulation-api
-    ports:
-      - "8000:8000"
-    depends_on:
-      hydrate-redis:
-        condition: service_completed_successfully
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    volumes:
-      - ./models:/app/models
+      build:
+        context: .
+        dockerfile: Dockerfile.api
+      container_name: simulation-api
+      ports:
+        - "8000:8000"
+      depends_on:
+        hydrate-redis:
+          condition: service_completed_successfully
+      environment:
+        - REDIS_HOST=redis
+        - REDIS_PORT=6379
+        - DB_HOST=postgres
+        - DB_PORT=5432
+        - DB_NAME=amen_anomaly
+        - DB_USER=postgres
+        - DB_PASSWORD=postgres
+      volumes:
+        - ./models:/app/models
+        - ./src:/app/src
 
   enrichment-service:
     build:
@@ -147,8 +157,15 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - KAFKA_BOOTSTRAP=redpanda:29092
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
     volumes:
       - ./models:/app/models
+      - ./data:/app/data
+      - ./src:/app/src
 
   scoring-service:
     build:
@@ -167,8 +184,14 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - KAFKA_BOOTSTRAP=redpanda:29092
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
     volumes:
       - ./models:/app/models
+      - ./src:/app/src
 
   decision-service:
     build:
@@ -187,8 +210,14 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - KAFKA_BOOTSTRAP=redpanda:29092
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
     volumes:
       - ./models:/app/models
+      - ./src:/app/src
 
   raw-events-sink:
     build:
@@ -210,6 +239,8 @@ services:
       - DB_USER=postgres
       - DB_PASSWORD=postgres
       - KAFKA_BOOTSTRAP=redpanda:29092
+    volumes:
+      - ./src:/app/src
 
   decisions-sink:
     build:
@@ -235,6 +266,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - KAFKA_BOOTSTRAP=redpanda:29092
+    volumes:
+      - ./src:/app/src
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:latest
@@ -253,6 +286,7 @@ services:
       - "9090:9090"
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./config/alert_rules.yml:/etc/prometheus/alert_rules.yml
     depends_on:
       - kafka-exporter
       - enrichment-service
@@ -260,6 +294,7 @@ services:
       - decision-service
       - raw-events-sink
       - decisions-sink
+      - alertmanager
 
   simulator:
     build:
@@ -279,8 +314,12 @@ services:
       - DB_USER=postgres
       - DB_PASSWORD=postgres
       - KAFKA_BOOTSTRAP=redpanda:29092
+    volumes:
+      - ./src:/app/src
     profiles:
       - simulate
+  
+
 
   airflow-init:
     <<: *airflow-common
@@ -305,6 +344,12 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    volumes:
+      - .:/app
+      - ./dags:/app/dags
+      - ./models:/app/models
+      - airflow-logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
   airflow-scheduler:
@@ -313,8 +358,77 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    volumes:
+      - .:/app
+      - ./dags:/app/dags
+      - ./models:/app/models
+      - airflow-logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.15.1
+    ports:
+      - "5001:5000"
+    volumes:
+      - ./mlruns:/mlflow/mlruns
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri file:///mlflow/mlruns
+      --default-artifact-root file:///mlflow/mlruns
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    restart: unless-stopped
+
+  webhook-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.webhook
+    command: uvicorn src.webhook.relay:app --host 0.0.0.0 --port 8000
+    environment:
+      - AIRFLOW_URL=http://airflow-webserver:8080
+      - AIRFLOW_ADMIN_PASSWORD=admin
+    depends_on:
+      - airflow-webserver
     restart: unless-stopped
   
+  
+  training:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: amen-anomaly-training:latest
+    container_name: training
+    command: python -m src.training.train_all
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=amen_anomaly
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./src:/app/src
+    profiles:
+      - training
 
   dashboard:
     build:

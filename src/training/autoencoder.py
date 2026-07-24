@@ -112,17 +112,23 @@ def train(data, hidden_dims=[20, 10], epochs=50, batch_size=256, lr=1e-3):
     return model
 
 
-def evaluate(model, data):
-    """Evaluate on test set. Print overall + per-scenario + per-difficulty AUC."""
+def compute_scores(model, X):
+    """Reconstruction error (per-sample MSE) for feature array X."""
+    X_t = X if isinstance(X, torch.Tensor) else torch.FloatTensor(X)
+    model.eval()
+    with torch.no_grad():
+        recon = model(X_t)
+        scores = (recon - X_t).pow(2).mean(dim=1).numpy()
+    return scores
 
-    X_test_t = torch.FloatTensor(data["X_test"])
+
+def evaluate(model, data):
+    """Evaluate on test set. Print overall + per-scenario AUC."""
+
     y_test   = data["y_test"]
     test_df  = data["test_df"].copy()
 
-    model.eval()
-    with torch.no_grad():
-        recon = model(X_test_t)
-        scores = (recon - X_test_t).pow(2).mean(dim=1).numpy()
+    scores = compute_scores(model, data["X_test"])
 
     # Overall
     test_auc = roc_auc_score(y_test, scores)
@@ -135,15 +141,15 @@ def evaluate(model, data):
     normal_mask = test_df["is_anomaly"] == False
 
     print(f"\nPer-scenario AUC (test set):")
-    print(f"  {'Scenario':<30s}  {'AUC':>6s}  {'Count':>5s}  {'Difficulty'}")
+    print(f"  {'Scenario':<30s}  {'AUC':>6s}  {'Count':>5s}")
     print(f"  {'-'*65}")
 
     anom_groups = (test_df[test_df["is_anomaly"] == True]
-                   .groupby(["anomaly_type", "difficulty"])
+                   .groupby("anomaly_type")
                    .size().reset_index(name="count"))
 
     for _, row in anom_groups.iterrows():
-        atype, diff, count = row["anomaly_type"], row["difficulty"], row["count"]
+        atype, count = row["anomaly_type"], row["count"]
         anom_mask = test_df["anomaly_type"] == atype
         subset = test_df[anom_mask | normal_mask]
         y_sub = subset["is_anomaly"].values.astype(int)
@@ -153,20 +159,7 @@ def evaluate(model, data):
             auc = roc_auc_score(y_sub, s_sub)
         else:
             auc = float("nan")
-        print(f"  {atype:<30s}  {auc:>6.4f}  {count:>5d}  {diff}")
-
-    # Per-difficulty
-    print(f"\nPer-difficulty AUC:")
-    for diff in ["easy", "medium", "hard"]:
-        diff_mask = test_df["difficulty"] == diff
-        if diff_mask.sum() == 0:
-            continue
-        subset = test_df[diff_mask | normal_mask]
-        y_sub = subset["is_anomaly"].values.astype(int)
-        s_sub = subset["score"].values
-        auc = (roc_auc_score(y_sub, s_sub)
-               if 0 < y_sub.sum() < len(y_sub) else float("nan"))
-        print(f"  {diff:<10s}  AUC={auc:.4f}  n={int(diff_mask.sum())}")
+        print(f"  {atype:<30s}  {auc:>6.4f}  {count:>5d}")
 
     # Score distribution
     print(f"\nScore distribution:")

@@ -1,0 +1,11 @@
+route:
+  receiver: airflow-webhook
+  group_wait: 10s
+  group_interval: 1h
+  repeat_interval: 24h
+
+receivers:
+  - name: airflow-webhook
+    webhook_configs:
+      - url: "http://webhook-relay:8000/trigger"
+        send_resolved: false

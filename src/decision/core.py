@@ -3,7 +3,7 @@
 import json
 import time
 import redis
-from src.decision.decision import DecisionService, DecisionInput
+from src.decision.decision import DecisionService, DecisionInput, AlertTier
 
 OPERATIONS = ["retrait", "versement", "virement", "cheque"]
 
@@ -25,6 +25,16 @@ class DecisionCore:
             profile = self._fetch_profile(scored["client_id"])
             inp = self._build_input(scored, profile)
             decision = self.engine.decide(inp)
+
+            # ── Cold-start tier cap ───────────────────────
+            if scored.get("cold_start", False):
+                buf_len = scored.get("buffer_length", 0)
+                decision.reasons.append(
+                    f"Cold-start client ({buf_len}/5 events) — tier capped at REVIEW"
+                )
+                if decision.tier > AlertTier.REVIEW:
+                    decision.tier = AlertTier.REVIEW
+
             output = self._build_output(scored, decision)
 
             if self.metrics:
@@ -52,7 +62,7 @@ class DecisionCore:
 
     def _compute_expected_daily_rate(self, profile):
         total = sum(profile.get(f"tx_{op}_30d_count", 0) for op in OPERATIONS)
-        return max(total / 30.0, 0.1)
+        return max(total / 30.0, 1.0)
 
     def _build_input(self, scored, profile):
         if profile:

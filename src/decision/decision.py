@@ -14,6 +14,7 @@ Four layers of logic applied in order:
 Tiers can only be ESCALATED by rules, never de-escalated.
 """
 
+import math
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, List
@@ -205,12 +206,13 @@ class DecisionService:
                 f"{inp.cumulative_amount_24h:.0f} DT cumulative in 24h")
             tier = max(tier, AlertTier.REVIEW)
 
-        # Rule 8: Frequency burst (context-aware)
-        if (inp.expected_daily_rate > 0
-                and inp.tx_count_24h >= inp.expected_daily_rate * 5):
+        # Rule 8: Frequency burst (Poisson z-score, context-aware)
+        threshold = inp.expected_daily_rate + 3 * math.sqrt(inp.expected_daily_rate)
+        if inp.tx_count_24h >= threshold:
             reg_flags.append(
                 f"Frequency burst: {inp.tx_count_24h} txns in 24h vs "
-                f"expected {inp.expected_daily_rate:.1f}/day")
+                f"expected {inp.expected_daily_rate:.1f}/day "
+                f"(Poisson threshold {threshold:.1f})")
             tier = max(tier, AlertTier.REVIEW)
 
         # ════════════════════════════════════════════════════════

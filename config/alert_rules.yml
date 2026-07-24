@@ -1,0 +1,20 @@
+# config/alert_rules.yml
+groups:
+  - name: model_drift
+    interval: 30s
+    rules:
+      - alert: ScoreDistributionDrift
+        expr: |
+          (
+            1 - (
+              rate(fused_score_distribution_bucket{le="0.95"}[1h])
+              /
+              rate(fused_score_distribution_count[1h])
+            )
+          ) > 0.15
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model drift detected — high-score event ratio exceeded 15%"
+          description: "{{ $value | humanizePercentage }} of events scored above T1 in the last hour"

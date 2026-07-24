@@ -88,7 +88,7 @@ def run_enrichment():
 
     # Prepare CSV writer — write header first, then append rows in chunks
     feature_cols = core.feature_cols
-    output_cols = feature_cols + ["event_id", "client_id", "is_anomaly", "anomaly_type"]
+    output_cols = feature_cols + ["event_id", "client_id", "is_anomaly", "anomaly_type","timestamp"]
 
     csv_file = open(OUTPUT_PATH, "w", newline="")
     writer = csv.DictWriter(csv_file, fieldnames=output_cols, extrasaction="ignore")
@@ -149,6 +149,7 @@ def run_enrichment():
             features["client_id"] = cid
             features["is_anomaly"] = is_anomaly
             features["anomaly_type"] = anomaly_type
+            features["timestamp"] = ts
             chunk_results.append(features)
 
             # Update buffers

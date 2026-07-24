@@ -131,23 +131,29 @@ class ProfileHydrator:
         cursor.close()
         print(f"Hydrated {count} client buffers into Redis")
         return count
-    def run(self):
+    def run(self, skip_buffers=False):
         print("Starting profile hydration...")
         self.hydrate_client_profiles()
         self.hydrate_employee_profiles()
         self.hydrate_archetype_baselines()
-        self.hydrate_client_buffers()
+        if not skip_buffers:
+            self.hydrate_client_buffers()
+        else:
+            print("Skipping client buffer hydration (--skip-buffers)")
         print("Hydration complete")
     
     def close(self):
         self.conn.close()
         self.redis.close()
 
-
 if __name__ == '__main__':
-    
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--skip-buffers', action='store_true')
+    args = parser.parse_args()
+
     hydrator = ProfileHydrator(db_config=DB_CONFIG, redis_host=REDIS_HOST, redis_port=REDIS_PORT)
     try:
-        hydrator.run()
+        hydrator.run(skip_buffers=args.skip_buffers)
     finally:
         hydrator.close()
