@@ -14,7 +14,7 @@ Transactions move through a four-stage streaming pipeline built on Kafka-compati
 | Streaming | Redpanda (Kafka API), kafka-python |
 | ML | PyTorch (Autoencoder + LSTM), scikit-learn, SHAP |
 | Feature Store | Redis (hot profiles, buffers, archetype baselines) |
-| Database | PostgreSQL 16 (cold profiles, transactions, alerts, evaluation labels) |
+| Database | PostgreSQL 17 (cold profiles, transactions, alerts, evaluation labels) |
 | Orchestration | Apache Airflow (LocalExecutor, DockerOperator) |
 | MLOps | MLflow (tracking, model registry) |
 | Monitoring | Prometheus, Alertmanager, kafka-exporter |
@@ -123,15 +123,15 @@ This lets the buffers build up organically as events stream through, which is mo
 
 ## Key Design Decisions
 
-**Single Kafka topic per stage, not per client.** The LSTM scorer depends on strictly ordered per-client event sequences. Partitioning further (e.g. by client) would risk out-of-order delivery across partition reassignments; keeping each stage on a single topic with client_id as the message key guarantees ordering per key while still allowing horizontal consumer scaling.
+**Single Kafka topic per stage, partitioned by client_id.** All four operation types flow through one topic at each pipeline stage rather than one topic per operation type. This preserves cross-operation temporal ordering within each partition — critical for the LSTM sequence model, which needs to see a client's retrait followed by their versement in the correct order. The client_id partition key guarantees per-client ordering while still allowing horizontal consumer scaling.
 
 **EnrichmentCore has no I/O side effects.** All Redis/Postgres access happens in the wrapping service; `EnrichmentCore.enrich_event()` takes a profile and buffers already fetched and returns a pure feature dict. This makes feature computation independently testable and reusable between the streaming service and the batch backfill path used for training data.
 
-**Rules only escalate, never de-escalate.** The decision service's four layers (score tiering → regulatory rules → risk-history adjustment → explanation) can only raise a tier once assigned. A genuine ML-driven signal can never be silently downgraded by a rule; the one designed exception is false-positive dampening, which requires both a REVIEW-only tier and zero active regulatory flags before stepping a tier down.
+**Rules only escalate, never de-escalate.** The decision service's four layers (score tiering → regulatory rules → risk-history adjustment → explanation) can only raise a tier once assigned. A genuine ML-driven signal can never be silently downgraded by a rule.
 
 **No foreign key from `alerts` to `transactions`.** This is intentional, not an oversight: the raw-events sink and decisions sink consume from different topics in parallel, so a decision can legitimately reach Postgres before its corresponding raw event does. Referential integrity is guaranteed by pipeline topology instead of a database constraint.
 
-**Three-tier cold-start scoring.** New clients get progressively more weight on the LSTM as `days_since_opening` grows (sigmoid ramp), fall back to AE-only scoring when there isn't enough sequence history at all, and get an explicit conservative floor in the decision layer — a cold-start client scoring above 0.90 is escalated to REVIEW even if it wouldn't otherwise cross a tier threshold, since "unusual for a client we barely know" is itself a signal.
+**Three-tier cold-start scoring.** Clients with fewer than 5 events in their sequence buffer receive a neutral fused score of 0.5 with cold_start=True — the models are not invoked at all. The decision service still runs all regulatory rules (a structuring pattern is suspicious even from a new client) but caps the final tier at REVIEW maximum. Between 5 and 9 events, only the AE scores (LSTM weight forced to 0). At 10+ events, full AE+LSTM fusion engages with sigmoid weighting by account maturity.
 
 **DLQ with failure classification.** Every streaming consumer wraps `process_fn` in a resilient handler that distinguishes transient infrastructure errors (Redis/Postgres connection issues — retried with exponential backoff) from poison-pill events (malformed payloads — sent straight to a `dlq` topic with the full stack trace and original event, no retry wasted).
 
@@ -139,7 +139,7 @@ This lets the buffers build up organically as events stream through, which is mo
 
 ## MLOps Pipeline
 
-Retraining is triggered three ways: a weekly Sunday cron (`weekly_retrain` DAG), a Prometheus-detected drift alert forwarded through the webhook relay to Airflow, and a daily feedback-divergence check that fires when supervisors are rejecting more than half of ALERT/BLOCK alerts. Every trigger runs the same DAG — batch re-enrichment, a feature-completeness/NaN-rate validation gate, then a containerized training run (`train_all`) that logs metrics, parameters, and artifacts to MLflow. Promotion is not automatic: new model runs land in the MLflow registry for comparison against the current production metrics before being promoted, keeping a human in the loop on any model swap.
+Retraining is triggered three ways: a weekly Sunday cron (`weekly_retrain` DAG), a Prometheus-detected drift alert forwarded through the webhook relay to Airflow, and a daily feedback-divergence check that fires when supervisors are rejecting more than half of ALERT/BLOCK alerts. Every trigger runs the same DAG — batch re-enrichment, a feature-completeness/NaN-rate validation gate, then a containerized training run (`train_all`) that logs metrics, parameters, and artifacts to MLflow. Promotion is automatic: the training script compares the new AUC against models/production_metrics.json and overwrites the production model files only if the new AUC meets or exceeds the current value. MLflow's role is post-mortem — when a promotion gate rejects a model at 4 AM, engineers can inspect the full run on Monday.
 
 ## Dashboard
 
@@ -147,19 +147,23 @@ The Streamlit supervisor dashboard at `http://localhost:8501` auto-refreshes eve
 
 ## Anomaly Scenarios
 
-The synthetic data generator injects nine labeled anomaly scenarios across three difficulty tiers, used both to validate detection and to drive the live simulation demo.
+The synthetic data generator injects thirteen labeled anomaly scenarios across three difficulty tiers, used both to validate detection and to drive the live simulation demo.
 
-| Scenario | Difficulty | Description |
-|---|---|---|
-| amount_spike | Easy | Single transaction far above the client's usual amount |
-| round_amount | Easy | Suspiciously round transaction amount |
-| duplicate_virement | Easy | Near-identical transfer repeated in a short window |
-| timing_anomaly | Medium | Transaction far from the client's usual day-of-month pattern |
-| frequency_burst | Medium | Sudden spike in transaction count over the client's expected rate |
-| cumulative_threshold | Medium | Multiple transactions cumulatively approaching a regulatory threshold |
-| smurfing | Hard | Sustained structuring just under the reporting threshold |
-| cheque_structuring | Hard | Cheque amounts kept just under the legal ceiling (Law n°41-2024) |
-| repeated_client_employee | Hard | Unusually concentrated client-employee pairing (collusion pattern) |
+| Scenario | Difficulty | Actor | Description |
+|---|---|---|---|
+| amount_spike | Easy | Client | Single transaction far above the client's usual amount |
+| round_amount | Easy | Client | Suspiciously round transaction amount (5000, 10000, 15000, 20000 DT) |
+| duplicate_virement | Easy | Client | Near-identical transfer repeated in a short window |
+| volume_spike | Easy | Employee | Sudden spike in an employee's processed transaction volume |
+| frequency_burst | Medium | Client | Sudden spike in transaction count over the client's expected rate |
+| cumulative_threshold | Medium | Client | Multiple transactions cumulatively approaching a regulatory threshold |
+| timing_anomaly | Medium | Client | Transaction outside normal branch hours |
+| client_concentration | Medium | Employee | Unusually concentrated client-employee pairing |
+| smurfing | Hard | Client | Sustained structuring of deposits just under the 10,000 DT reporting threshold |
+| cheque_structuring | Hard | Client | Cheque amounts kept just under the 30,000 DT legal ceiling (Law n°41-2024) |
+| money_mule | Hard | Client | Account used as pass-through for rapid in/out transfers |
+| behavioral_drift | Hard | Client | Gradual shift in transaction patterns over weeks |
+| cross_actor | Hard | Cross | Coordinated anomalous behavior between client and employee |
 
 ## Model Performance
 
