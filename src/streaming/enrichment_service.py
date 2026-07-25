@@ -4,11 +4,14 @@ import json
 from kafka import KafkaConsumer, KafkaProducer
 from src.config import KAFKA_BOOTSTRAP
 from src.enrichment import EnrichmentCore
+from src.streaming.dlq import ResilientConsumer
+from src.streaming.logger import setup_logger
 
 
 class EnrichmentStreamingService:
     def __init__(self, core: EnrichmentCore):
         self.core = core
+        self.logger = setup_logger("enrichment")
 
         self.consumer = KafkaConsumer(
             'raw-events',
@@ -24,8 +27,16 @@ class EnrichmentStreamingService:
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
 
+        self.resilient = ResilientConsumer(
+            service_name="enrichment",
+            source_topic="raw-events",
+            process_fn=self.core.enrich_event,
+            producer=self.producer,
+            max_retries=3
+        )
+
     def run(self):
-        print("Enrichment Service started. Consuming from 'raw-events'...")
+        self.logger.info("Enrichment service started")
         count = 0
 
         while True:
@@ -36,18 +47,28 @@ class EnrichmentStreamingService:
             for topic_partition, batch in messages.items():
                 for msg in batch:
                     event = msg.value
-                    enriched = self.core.enrich_event(event)
+                    result = self.resilient.handle(event)
 
-                    self.producer.send(
-                        'enriched-events',
-                        key=event['client_id'],
-                        value=enriched
-                    )
+                    if result is not None:
+                        self.producer.send(
+                            'enriched-events',
+                            key=event['client_id'],
+                            value=result
+                        )
+                        self.logger.info(
+                            "Event enriched",
+                            extra={"event_id": event.get("event_id"), "client_id": event.get("client_id")},
+                        )
+                    else:
+                        self.logger.warning(
+                            "Event failed processing",
+                            extra={"event_id": event.get("event_id")},
+                        )
 
                     count += 1
                     if count % 100 == 0:
                         self.producer.flush()
-                        print(f"Enriched {count} events")
+                        self.logger.info(f"Enriched {count} events")
 
     def close(self):
         self.consumer.close()

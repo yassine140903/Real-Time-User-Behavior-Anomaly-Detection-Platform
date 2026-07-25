@@ -4,11 +4,14 @@ import json
 from kafka import KafkaConsumer, KafkaProducer
 from src.config import KAFKA_BOOTSTRAP
 from src.scoring import ScoringCore
+from src.streaming.dlq import ResilientConsumer
+from src.streaming.logger import setup_logger
 
 
 class ScoringStreamingService:
     def __init__(self, core: ScoringCore):
         self.core = core
+        self.logger = setup_logger("scoring")
 
         self.consumer = KafkaConsumer(
             'enriched-events',
@@ -24,8 +27,16 @@ class ScoringStreamingService:
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
 
+        self.resilient = ResilientConsumer(
+            service_name="scoring",
+            source_topic="enriched-events",
+            process_fn=self.core.score_event,
+            producer=self.producer,
+            max_retries=3
+        )
+
     def run(self):
-        print("Scoring Service started. Consuming from 'enriched-events'...")
+        self.logger.info("Scoring service started")
         count = 0
 
         while True:
@@ -36,18 +47,32 @@ class ScoringStreamingService:
             for topic_partition, batch in messages.items():
                 for msg in batch:
                     enriched = msg.value
-                    scored = self.core.score_event(enriched)
+                    result = self.resilient.handle(enriched)
 
-                    self.producer.send(
-                        'scored-events',
-                        key=enriched['client_id'],
-                        value=scored
-                    )
+                    if result is not None:
+                        self.producer.send(
+                            'scored-events',
+                            key=enriched['client_id'],
+                            value=result
+                        )
+                        self.logger.info(
+                            "Event scored",
+                            extra={
+                                "event_id": enriched.get("event_id"),
+                                "client_id": enriched.get("client_id"),
+                                "score": result.get("fused_score") if isinstance(result, dict) else None,
+                            },
+                        )
+                    else:
+                        self.logger.warning(
+                            "Event failed processing",
+                            extra={"event_id": enriched.get("event_id")},
+                        )
 
                     count += 1
                     if count % 100 == 0:
                         self.producer.flush()
-                        print(f"Scored {count} events")
+                        self.logger.info(f"Scored {count} events")
 
     def close(self):
         self.consumer.close()

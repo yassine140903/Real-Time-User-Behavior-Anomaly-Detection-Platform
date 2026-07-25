@@ -4,11 +4,14 @@ import json
 from kafka import KafkaConsumer, KafkaProducer
 from src.config import KAFKA_BOOTSTRAP
 from src.decision import DecisionCore
+from src.streaming.dlq import ResilientConsumer
+from src.streaming.logger import setup_logger
 
 
 class DecisionStreamingService:
     def __init__(self, core: DecisionCore):
         self.core = core
+        self.logger = setup_logger("decision")
 
         self.consumer = KafkaConsumer(
             'scored-events',
@@ -24,8 +27,16 @@ class DecisionStreamingService:
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
 
+        self.resilient = ResilientConsumer(
+            service_name="decision",
+            source_topic="scored-events",
+            process_fn=self.core.decide_event,
+            producer=self.producer,
+            max_retries=3
+        )
+
     def run(self):
-        print("Decision Service started. Consuming from 'scored-events'...")
+        self.logger.info("Decision service started")
         count = 0
         alert_count = 0
 
@@ -37,21 +48,35 @@ class DecisionStreamingService:
             for topic_partition, batch in messages.items():
                 for msg in batch:
                     scored = msg.value
-                    output = self.core.decide_event(scored)
+                    output = self.resilient.handle(scored)
 
-                    self.producer.send(
-                        'decisions',
-                        key=scored['client_id'],
-                        value=output
-                    )
+                    if output is not None:
+                        self.producer.send(
+                            'decisions',
+                            key=scored['client_id'],
+                            value=output
+                        )
+                        self.logger.info(
+                            "Decision made",
+                            extra={
+                                "event_id": output.get("event_id"),
+                                "client_id": output.get("client_id"),
+                                "alert_tier": output.get("tier"),
+                            },
+                        )
+
+                        if output["tier"] != "INFO":
+                            alert_count += 1
+                    else:
+                        self.logger.warning(
+                            "Event failed processing",
+                            extra={"event_id": scored.get("event_id")},
+                        )
 
                     count += 1
-                    if output["tier"] != "INFO":
-                        alert_count += 1
-
                     if count % 100 == 0:
                         self.producer.flush()
-                        print(f"Decided {count} events | {alert_count} alerts")
+                        self.logger.info(f"Decided {count} events | {alert_count} alerts")
 
     def close(self):
         self.consumer.close()
