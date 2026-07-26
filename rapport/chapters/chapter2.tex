@@ -1,0 +1,520 @@
+This chapter presents the overall system architecture, the data schemas that define
+the contract between services, and the key design decisions that shaped the platform.
+Every choice is grounded in the operational constraints of branch teller banking in
+the Tunisian regulatory context.
+
+% ═══════════════════════════════════════════════════════════
+\section{System Overview}
+% ═══════════════════════════════════════════════════════════
+
+The platform follows a \textbf{streaming-first architecture} with four microservices
+chained via message topics, supported by a hot/cold data layer and a batch pipeline
+for profile rebuilding and model retraining. The system monitors two independent
+actors --- the \textbf{client} initiating the transaction and the \textbf{employee}
+processing it --- reflecting the dual-actor nature of branch teller operations where
+anomalies can originate from either side.
+
+The streaming pipeline processes each transaction through four stages: ingestion of
+the raw event, enrichment with behavioral context from client and employee profiles,
+scoring via two complementary deep learning models, and a decision layer that merges
+the ML signal with deterministic regulatory rules. The output is a tiered alert
+with a human-readable explanation, consumed by a supervisor dashboard.
+
+Three foundational choices define the architecture:
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{RedPanda over Apache Kafka.} RedPanda provides a Kafka-compatible
+          API without the JVM runtime or ZooKeeper dependency, reducing operational
+          complexity while maintaining protocol compatibility. The project's throughput
+          --- hundreds of events per minute from 150 branches --- does not require
+          Kafka's horizontal scaling capabilities. Critically, the architecture remains
+          \textbf{language-agnostic at topic boundaries}: any service can be rewritten
+          in a JVM-based language without changing the topic contracts.
+
+    \item \textbf{Dual-actor profiling.} Both the client and the processing employee
+          are independently profiled. Each actor has a hot profile in Redis for
+          real-time lookups and a cold profile in PostgreSQL for historical analysis.
+          This design is motivated by CTAF case studies where collusion between a
+          client and a specific teller was a key pattern (e.g., \textit{passeur de fonds}
+          scenarios where the same employee processes repeated suspicious transactions
+          for the same client).
+
+    \item \textbf{SHAP co-located in the Scoring Service.} Explainability is computed
+          at scoring time, not at display time. The SHAP explanation travels as part
+          of the event payload through the Decision Service to the \texttt{decisions}
+          topic. This simplifies the dashboard to a single-topic consumer and guarantees
+          that every alert carries its explanation, regardless of how it is consumed
+          downstream.
+\end{enumerate}
+
+% ═══════════════════════════════════════════════════════════
+\section{Streaming Topology}
+% ═══════════════════════════════════════════════════════════
+
+Four RedPanda topics form the streaming backbone:
+
+\begin{center}
+\texttt{raw-events} $\rightarrow$ \texttt{enriched-events} $\rightarrow$
+\texttt{scored-events} $\rightarrow$ \texttt{decisions}
+\end{center}
+
+All four topics are \textbf{partitioned by \texttt{client\_id}}. This is a deliberate
+constraint driven by the LSTM model's requirements: the LSTM treats each client's
+transaction history as a temporal sequence and predicts what the next event should
+look like. Cross-operation ordering must be preserved per client --- a retrait
+followed by a versement followed by a virement must arrive at the Scoring Service in
+exactly that order. Partitioning by \texttt{client\_id} guarantees this ordering
+within each partition.
+
+A single \texttt{raw-events} topic carries all four operation types using a
+\textbf{tagged-union envelope}: a shared set of common fields plus an
+operation-specific \texttt{payload} object. The alternative --- four separate topics,
+one per operation type --- was rejected because it would break the cross-operation
+temporal ordering that the LSTM requires. If retrait events and virement events travel
+on separate topics, there is no guarantee of relative ordering at the consumer side.
+
+Two additional topics support the pipeline:
+
+\begin{itemize}[leftmargin=2cm]
+    \item \texttt{dlq} (Dead Letter Queue) --- receives events that failed processing
+          after retry exhaustion, preserving the original event alongside error metadata
+          for post-mortem analysis.
+\end{itemize}
+
+Between the streaming services, two \textbf{sink consumers} persist data to
+PostgreSQL: one writes raw events to the \texttt{transactions} table, the other
+writes decisions to the \texttt{alerts} table and updates risk history counters in
+Redis. The sinks operate with independent consumer groups, decoupling persistence
+from the transform-and-forward pipeline.
+
+% ═══════════════════════════════════════════════════════════
+\section{Hot/Cold Data Layer}
+% ═══════════════════════════════════════════════════════════
+
+The platform maintains two complementary data stores, each serving a distinct
+access pattern:
+
+\begin{itemize}[leftmargin=2cm]
+    \item \textbf{Redis (hot layer)} stores data that must be available with
+          sub-millisecond latency during streaming enrichment: client profiles
+          (\texttt{profile:client:\{id\}}), employee profiles
+          (\texttt{profile:employee:\{id\}}), archetype baselines
+          (\texttt{baseline:\{archetype\}}), per-client event buffers for velocity
+          feature computation (\texttt{buffer:client:\{id\}}), and LSTM sequence
+          buffers (\texttt{sequence:client:\{id\}}).
+
+    \item \textbf{PostgreSQL (cold layer)} stores the persistent record of all
+          transactions, alert history, profile snapshots for audit and retraining,
+          and master reference data (clients, employees, accounts). It serves as
+          the source of truth for batch processing and the dashboard's query backend.
+\end{itemize}
+
+The nightly batch pipeline reads from PostgreSQL, recomputes all aggregate statistics
+and behavioral distributions for both actors, writes snapshots back to PostgreSQL for
+audit, and refreshes the Redis hot profiles. This ensures that the hot layer reflects
+the latest behavioral patterns without requiring the streaming services to maintain
+complex windowed aggregations.
+
+LSTM sequence buffers in Redis store \textbf{unscaled} feature vectors. The Scoring
+Service applies the current scaler on-the-fly at inference time. This design ensures
+that a weekly model retrain --- which produces a new scaler --- does not invalidate
+the persisted sequences, avoiding a full buffer rebuild on every retrain.
+
+% ═══════════════════════════════════════════════════════════
+\section{Raw Event Schema}
+% ═══════════════════════════════════════════════════════════
+
+The raw event uses a tagged-union envelope: a common set of 11 fields shared by all
+operations, plus a \texttt{payload} field containing operation-specific data. Two
+principles govern the schema:
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{Raw events contain only facts observable at transaction time.}
+          No aggregate statistics, no derived fields. Statistics belong in profiles;
+          derived features belong in the enriched event.
+    \item \textbf{No lagging fields.} A cheque's bounce status, for example, is only
+          known after clearing and belongs to a separate downstream event, not the
+          raw event.
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\caption{Common envelope fields}
+\label{tab:raw-event-envelope}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{event\_id}       & UUID     & Unique event identifier \\
+\texttt{client\_id}      & UUID     & Client initiating the transaction \\
+\texttt{account\_id}     & UUID     & Target account \\
+\texttt{employee\_id}    & UUID     & Teller processing the transaction \\
+\texttt{branch\_id}      & String   & Branch where the operation occurs \\
+\texttt{timestamp}       & Datetime & UTC timestamp \\
+\texttt{amount}          & Float    & Transaction amount \\
+\texttt{currency}        & String   & ISO 4217 code (typically TND) \\
+\texttt{channel}         & Enum     & \texttt{guichet}, \texttt{GAB}, etc. \\
+\texttt{operation\_type} & Enum     & \texttt{retrait}, \texttt{versement}, \texttt{virement}, \texttt{cheque} \\
+\texttt{payload}         & JSON     & Operation-specific data (see below) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each operation type defines its own payload structure. For example, a \texttt{virement}
+payload includes \texttt{beneficiary\_id} and \texttt{motif}, while a
+\texttt{cheque} payload includes \texttt{emitter\_id}, \texttt{cheque\_number}, and
+a \texttt{remise\_id} that groups multiple cheques deposited together. The
+\texttt{remise\_id} design preserves per-cheque granularity for anomaly scoring while
+maintaining the grouping context --- each cheque generates its own event rather than
+one event per remise.
+
+% ═══════════════════════════════════════════════════════════
+\section{Dual-Actor Profiling}
+% ═══════════════════════════════════════════════════════════
+
+\subsection{Client Profile}
+
+The client profile comprises approximately 194 fields organized across six categories:
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{Personal information} (7 fields): archetype, maturity status
+          (\texttt{cold\_start} or \texttt{mature}), home branch, client type
+          (individual or business), account opening date.
+
+    \item \textbf{Transaction statistics} (113 fields): for each combination of
+          operation type (4) and time window (24h, 7d, 30d, 90d), six statistics
+          are maintained: count, sum, mean, standard deviation, minimum, and maximum.
+          This structure enables contrast features at multiple temporal granularities.
+
+    \item \textbf{Behavioral patterns} (12 structures): five frequency distributions
+          computed at two horizons (30-day and 180-day) --- branch visits, transaction
+          hour, day-of-week, operation type mix, and employee interactions. Two
+          relationship maps track known beneficiaries and known emitters over 365 days.
+          Jensen-Shannon divergence between the 30-day and 180-day distributions
+          captures behavioral drift in a single scalar per dimension.
+
+    \item \textbf{Financial state} (12 fields): balance statistics, inflow/outflow
+          sums, and net flow at 30-day and 90-day windows.
+
+    \item \textbf{Risk history} (49 fields): alert counts per tier (INFO, REVIEW,
+          ALERT, BLOCK) per window (30d, 90d, 180d), each split into confirmed,
+          rejected, and pending by the supervisor. This enables recidivist escalation
+          and false-positive dampening in the Decision Service.
+
+    \item \textbf{LSTM sequence buffer}: the last 50 events for this client, stored
+          as a bounded Redis list. The sequence length matches the training configuration
+          to prevent any train/inference context mismatch.
+\end{enumerate}
+
+\subsection{Employee Profile}
+
+The employee profile mirrors the client profile structure with two key differences.
+First, \textbf{financial state is excluded} --- monitoring an employee's personal
+finances is out of scope and raises ethical concerns. Second, a
+\textbf{peer comparison} category is added, comprising five z-scores at two horizons
+(30-day and 90-day):
+
+\begin{itemize}[leftmargin=2cm]
+    \item Volume z-score (transactions processed relative to peers)
+    \item Error rate z-score
+    \item Near-threshold ratio z-score (fraction of transactions in the
+          8,000--9,999~DT smurfing band)
+    \item Client concentration z-score (serving few vs.\ many distinct clients)
+    \item Client-location mismatch z-score
+\end{itemize}
+
+A normalization challenge arises from the branch structure: with only 2 tellers per
+branch, per-branch z-scores are statistically meaningless. The solution uses a
+\textbf{split normalization} approach. Volume metrics are first normalized per-branch
+(employee volume divided by branch average volume), then z-scored bank-wide. This
+prevents high-volume branches from appearing as outliers while still detecting
+employees who handle disproportionate volume within their branch. Ratio metrics
+(near-threshold ratio, error rate, client concentration) are z-scored directly
+bank-wide, since ratios are already volume-independent.
+
+% ═══════════════════════════════════════════════════════════
+\section{Enriched Event Design}
+\label{sec:enriched-event-design}
+% ═══════════════════════════════════════════════════════════
+
+The enriched event is the feature vector consumed by the Scoring Service. Its design
+underwent a fundamental revision during the project that produced the single most
+impactful improvement in detection performance.
+
+\subsection{The Profile Dominance Problem}
+
+The initial enriched event schema contained 74 features, many of which were raw
+profile field dumps --- weekly snapshot means, standard deviations, and full
+distribution vectors repeated identically across every event from the same client
+within the same week. The per-event signal (how unusual \textit{this} transaction is)
+was drowned out by profile noise (what the client's long-term averages are). Both the
+Autoencoder and the LSTM failed to distinguish normal from anomalous events, producing
+AUC scores near random ($\sim$0.57).
+
+\subsection{Contrast Feature Redesign}
+
+The solution was to replace profile dumps with \textbf{contrast features}: each
+feature measures the deviation of the current event against the client's established
+baseline. The feature count dropped from 74 to 30, organized as follows:
+
+\begin{table}[H]
+\centering
+\caption{Enriched event feature schema (30 features)}
+\label{tab:enriched-features}
+\begin{tabular}{@{}p{3.5cm}cp{7.5cm}@{}}
+\toprule
+\textbf{Category} & \textbf{Count} & \textbf{Features} \\
+\midrule
+Raw event        & 7  & \texttt{amount}, \texttt{hour}, 4 operation one-hot flags,
+                        \texttt{is\_home\_branch} \\
+Amount contrast  & 6  & \texttt{z\_amount}, \texttt{amount\_to\_mean\_ratio},
+                        \texttt{is\_above\_threshold}, \texttt{is\_near\_threshold},
+                        \texttt{is\_round\_amount}, \texttt{is\_near\_cheque\_ceiling} \\
+Operation contrast & 1 & \texttt{op\_type\_probability} (from 30d distribution) \\
+Timing contrast  & 2  & \texttt{is\_outside\_hours},
+                        \texttt{day\_distance\_from\_preferred} \\
+Velocity         & 8  & \texttt{tx\_count\_24h}, \texttt{tx\_count\_7d},
+                        \texttt{cumulative\_amount\_24h},
+                        \texttt{has\_duplicate\_recent},
+                        \texttt{near\_threshold\_count\_7d},
+                        \texttt{employee\_tx\_count\_24h},
+                        \texttt{same\_employee\_client\_count\_24h},
+                        \texttt{is\_new\_counterparty} \\
+Context          & 6  & 5 archetype one-hot flags, \texttt{account\_age\_days} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The key invariant: the \texttt{\_compute\_features()} function that produces these
+30 features is a \textbf{pure function} --- identical inputs always produce identical
+outputs, with no I/O or side effects. Both the streaming pipeline and the batch
+training pipeline call this same function, guaranteeing zero feature drift between
+training and inference. This is the single most important technical invariant in the
+system.
+
+% ═══════════════════════════════════════════════════════════
+\section{Scoring Architecture}
+% ═══════════════════════════════════════════════════════════
+
+The Scoring Service hosts two complementary models and fuses their outputs into a
+single anomaly score.
+
+\subsection{Dual-Model Rationale}
+
+The \textbf{Autoencoder} is trained on normal transactions only and flags events with
+high reconstruction error. It excels at \textbf{point anomalies} --- single
+transactions that are unusual in isolation (e.g., a 15,000~DT retrait from a salaried
+client who averages 300~DT). It works from the very first event, requiring no
+transaction history.
+
+The \textbf{LSTM} treats a client's transaction history as a temporal sequence and
+predicts what the next event should look like. It excels at \textbf{sequential
+anomalies} --- patterns that are only suspicious in context (e.g., a gradual increase
+in versement frequency that individually looks normal but collectively signals
+structuring). It requires sufficient sequence history to be meaningful.
+
+\subsection{Score Fusion}
+
+The two models produce scores on fundamentally different scales (MSE reconstruction
+error for the AE, prediction error for the LSTM). Three mechanisms normalize and
+combine them:
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{Percentile normalization.} Each model's raw score is mapped to a
+          percentile rank against a reference distribution computed from normal
+          training data. This places both scores on a common $[0, 1]$ scale where
+          0.95 means ``higher than 95\% of normal events.''
+
+    \item \textbf{Maturity-adaptive weighting.} A sigmoid function of
+          \texttt{days\_since\_account\_opening} (midpoint 90 days) controls the
+          weight between models. New accounts favor the Autoencoder; mature accounts
+          favor the LSTM. \texttt{days\_since\_account\_opening} was chosen over event
+          count because event count penalizes low-frequency archetypes --- a retiree
+          who transacts twice a month is not ``new,'' but has a low event count.
+
+    \item \textbf{Weighted combination:}
+          $S_{\text{fused}} = w_{\text{lstm}} \cdot S_{\text{lstm}} + (1 - w_{\text{lstm}}) \cdot S_{\text{ae}}$
+\end{enumerate}
+
+\subsection{Cold-Start Scoring}
+
+Clients with fewer than 5 events in their sequence buffer fall outside the training
+distribution entirely (the training pipeline applies a warm-up filter). A three-tier
+progression handles this:
+
+\begin{table}[H]
+\centering
+\caption{Cold-start scoring progression}
+\label{tab:cold-start}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Buffer length} & \textbf{Scoring behavior} & \textbf{Tier cap} \\
+\midrule
+0--4 events   & Neutral score (0.5), \texttt{cold\_start=True} & REVIEW max \\
+5--9 events   & AE-only ($w_{\text{lstm}} = 0$) & Full range \\
+10+ events    & Full AE + LSTM fusion & Full range \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Cold-start events still pass through all regulatory rules --- a 15,000~DT transaction
+must trigger the BCT reporting flag regardless of buffer length --- but the ML-derived
+tier is capped at REVIEW to prevent score saturation from generating false BLOCKs.
+
+\subsection{Conditional SHAP}
+
+SHAP explanation is computationally expensive ($\sim$100ms per event via
+KernelExplainer). Since approximately 95\% of events score below the REVIEW threshold,
+SHAP computation is gated behind the threshold check. Events below REVIEW take the
+fast path ($\sim$5ms); events above receive full SHAP explanations. The Autoencoder
+uses KernelExplainer (DeepExplainer was ruled out because the anomaly score involves
+a subtraction outside the model's forward pass). The LSTM uses an expected-versus-actual
+comparison: the top-3 features with the largest deviation between the predicted and
+observed values, filtered through a whitelist of interpretable continuous features.
+
+A deterministic template dictionary maps feature names to parameterized natural
+language sentences, producing consistent and auditable explanations. An LLM-based
+approach was rejected due to bank security constraints and non-deterministic outputs.
+Example: ``\textit{This versement is suspect because the amount (8,450~DT) is
+4.2$\times$ the client's average, and it is the 3rd deposit in 48 hours.}''
+
+% ═══════════════════════════════════════════════════════════
+\section{Decision Service}
+% ═══════════════════════════════════════════════════════════
+
+The Decision Service is a stateless three-layer engine that merges the ML signal with
+deterministic regulatory rules and historical context.
+
+\subsection{Layer 1 --- Score Thresholds}
+
+Three thresholds calibrated on the validation set define the alert tiers:
+
+\begin{table}[H]
+\centering
+\caption{Alert tier thresholds}
+\label{tab:alert-tiers}
+\begin{tabular}{@{}llp{7cm}@{}}
+\toprule
+\textbf{Tier} & \textbf{Threshold} & \textbf{Meaning} \\
+\midrule
+REVIEW & $T_1 = 0.95$ & Supervisor reviews within 24 hours \\
+ALERT  & $T_2 = 0.99$ & Immediate supervisor attention required \\
+BLOCK  & $T_3 = 0.999$ & Transaction held, requires override \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Events below $T_1$ receive the INFO tier: logged for audit but requiring no action.
+
+\subsection{Layer 2 --- Regulatory Rule Escalation}
+
+Eight rules can \textbf{escalate} the tier determined by Layer~1 but
+\textbf{never de-escalate} it. This is a hard invariant: a regulatory flag cannot
+reduce alert severity. All regulatory flags are logged for audit regardless of
+whether they trigger an escalation.
+
+\begin{table}[H]
+\centering
+\caption{Regulatory escalation rules}
+\label{tab:regulatory-rules}
+\begin{tabular}{@{}clp{7cm}l@{}}
+\toprule
+\textbf{\#} & \textbf{Rule} & \textbf{Condition} & \textbf{Escalation} \\
+\midrule
+1 & BCT reporting     & Amount $\geq$ 10,000~DT \textit{and} $z_{\text{amount}} \geq 2$ & $\rightarrow$ ALERT \\
+2 & Smurfing band     & Amount in 8,000--9,999~DT \textit{and} $\geq$2 near-threshold txns in 7d & $\rightarrow$ ALERT \\
+3 & Cheque ceiling    & Amount in 25,000--30,000~DT (Law n°41-2024) & $\rightarrow$ REVIEW \\
+4 & Passeur de fonds  & Occasional client, $\geq$5 versements in 24h & $\rightarrow$ ALERT \\
+5 & New beneficiary   & Virement $\geq$ 5,000~DT to first-time beneficiary & $\rightarrow$ REVIEW \\
+6 & Duplicate         & Matching operation within time window & $\rightarrow$ REVIEW \\
+7 & Round amount      & Amount $\geq$ 5,000~DT, round, with high 24h cumulative & $\rightarrow$ REVIEW \\
+8 & Frequency burst   & $\geq 5\times$ expected daily rate & $\rightarrow$ REVIEW \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Rule~1 includes a $z_{\text{amount}} \geq 2$ guard: a 15,000~DT virement from a big
+business client whose average is 20,000~DT is routine and should not flood the REVIEW
+queue. The guard ensures that only transactions that are \textit{both} above the
+regulatory threshold \textit{and} unusual for the specific client trigger escalation.
+
+\subsection{Layer 3 --- Risk History Adjustment}
+
+The third layer uses the client's alert history from their profile:
+
+\begin{itemize}[leftmargin=2cm]
+    \item \textbf{Recidivist escalation:} clients with $\geq$3 confirmed alerts in
+          30 days receive a tier boost --- a borderline event from a repeat offender
+          is treated more seriously.
+    \item \textbf{Cold-start conservatism:} new accounts (maturity status
+          \texttt{cold\_start}) receive a more aggressive scoring posture, reflecting
+          the higher risk associated with unestablished behavioral baselines.
+\end{itemize}
+
+\subsection{Explanation Assembly}
+
+The Decision Service produces different explanation structures depending on the
+alert trigger:
+
+\begin{itemize}[leftmargin=2cm]
+    \item \textbf{ML-only:} fused score crossed threshold $\rightarrow$ AE SHAP
+          contributions + LSTM expected-vs-actual deviations.
+    \item \textbf{Rule-only:} regulatory rule escalated tier $\rightarrow$ rule
+          description with specific values.
+    \item \textbf{Both:} score set initial tier, rule escalated further $\rightarrow$
+          combined explanation from all mechanisms.
+\end{itemize}
+
+% ═══════════════════════════════════════════════════════════
+\section{Software Architecture}
+\label{sec:software-architecture}
+% ═══════════════════════════════════════════════════════════
+
+A mid-project requirement --- adding a synchronous REST endpoint for the dashboard's
+simulation mode --- exposed a coupling problem: all business logic was embedded inside
+Kafka consumer/producer wrappers. A synchronous \texttt{/score} request cannot route
+through the asynchronous streaming pipeline without unacceptable complexity.
+
+Three options were evaluated:
+
+\begin{table}[H]
+\centering
+\caption{Synchronous endpoint design evaluation}
+\label{tab:sync-options}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Option} & \textbf{Description} & \textbf{Verdict} \\
+\midrule
+Request-reply via Kafka & Push to topic, correlate response & Rejected (latency) \\
+Bypass Kafka            & Duplicate logic or call services  & Rejected (duplication) \\
+BFF / Orchestration     & Import cores, call in-process     & \textbf{Selected} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The solution applied a \textbf{core extraction} pattern: each service was split into
+a core module and a thin streaming wrapper.
+
+\begin{itemize}[leftmargin=2cm]
+    \item \textbf{Core module} (\texttt{EnrichmentCore}, \texttt{ScoringCore},
+          \texttt{DecisionCore}): receives external dependencies (Redis client, model
+          objects, metrics collector) via \textbf{dependency injection}. Exposes a
+          single public method (façade pattern). Contains all business logic. Has no
+          Kafka dependency.
+
+    \item \textbf{Streaming wrapper}: thin Kafka consumer/producer plumbing. Receives
+          a core instance via DI. The \texttt{run()} poll loop calls the core's public
+          method and produces the result to the output topic. Contains no business
+          logic.
+\end{itemize}
+
+The FastAPI simulation API imports the three core modules directly, wires them with
+shared Redis and model dependencies at startup via a lifespan context manager, and
+exposes a synchronous \texttt{/score} endpoint that calls
+\texttt{enrich} $\rightarrow$ \texttt{score} $\rightarrow$ \texttt{decide}
+in-process. A \texttt{dry\_run} flag on the enrichment step prevents simulation
+requests from polluting the streaming pipeline's Redis buffer state.
+
+This pattern also enables the batch enrichment pipeline to call the same
+\texttt{\_compute\_features()} function, guaranteeing feature parity across three
+execution contexts: streaming, batch, and simulation.

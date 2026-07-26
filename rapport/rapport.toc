@@ -1,0 +1,166 @@
+\babel@toc {english}{}\relax 
+\contentsline {chapter}{Acknowledgements}{i}{chapter*.1}%
+\contentsline {chapter}{List of Figures}{vii}{chapter*.1}%
+\contentsline {chapter}{List of Tables}{ix}{chapter*.1}%
+\contentsline {chapter}{List of Abbreviations}{x}{chapter*.2}%
+\contentsline {chapter}{General Introduction}{1}{chapter*.3}%
+\contentsline {chapter}{\numberline {1}Context and State of the Art}{3}{chapter.1}%
+\contentsline {section}{\numberline {1.1}Host Institution}{3}{section.1.1}%
+\contentsline {section}{\numberline {1.2}Branch Teller Operations}{3}{section.1.2}%
+\contentsline {section}{\numberline {1.3}Regulatory Framework}{4}{section.1.3}%
+\contentsline {subsection}{\numberline {1.3.1}Banque Centrale de Tunisie (BCT)}{4}{subsection.1.3.1}%
+\contentsline {subsection}{\numberline {1.3.2}Commission Tunisienne des Analyses Financières (CTAF)}{4}{subsection.1.3.2}%
+\contentsline {subsection}{\numberline {1.3.3}Law n°41-2024}{5}{subsection.1.3.3}%
+\contentsline {section}{\numberline {1.4}Existing Detection Capabilities}{5}{section.1.4}%
+\contentsline {section}{\numberline {1.5}State of the Art}{5}{section.1.5}%
+\contentsline {subsection}{\numberline {1.5.1}Rule-Based Detection}{5}{subsection.1.5.1}%
+\contentsline {subsection}{\numberline {1.5.2}Statistical Anomaly Detection}{6}{subsection.1.5.2}%
+\contentsline {subsection}{\numberline {1.5.3}Autoencoders for Anomaly Detection}{6}{subsection.1.5.3}%
+\contentsline {subsection}{\numberline {1.5.4}LSTM Networks for Sequential Anomaly Detection}{7}{subsection.1.5.4}%
+\contentsline {subsection}{\numberline {1.5.5}Score Fusion}{7}{subsection.1.5.5}%
+\contentsline {subsection}{\numberline {1.5.6}Explainability with SHAP}{8}{subsection.1.5.6}%
+\contentsline {subsection}{\numberline {1.5.7}Streaming Architectures for Real-Time Detection}{8}{subsection.1.5.7}%
+\contentsline {section}{\numberline {1.6}Problem Statement and Project Objectives}{9}{section.1.6}%
+\contentsline {chapter}{\numberline {2}System Architecture and Design}{10}{chapter.2}%
+\contentsline {section}{\numberline {2.1}System Overview}{10}{section.2.1}%
+\contentsline {section}{\numberline {2.2}Streaming Topology}{11}{section.2.2}%
+\contentsline {section}{\numberline {2.3}Hot/Cold Data Layer}{12}{section.2.3}%
+\contentsline {section}{\numberline {2.4}Raw Event Schema}{12}{section.2.4}%
+\contentsline {section}{\numberline {2.5}Dual-Actor Profiling}{13}{section.2.5}%
+\contentsline {subsection}{\numberline {2.5.1}Client Profile}{13}{subsection.2.5.1}%
+\contentsline {subsection}{\numberline {2.5.2}Employee Profile}{14}{subsection.2.5.2}%
+\contentsline {section}{\numberline {2.6}Enriched Event Design}{15}{section.2.6}%
+\contentsline {subsection}{\numberline {2.6.1}The Profile Dominance Problem}{15}{subsection.2.6.1}%
+\contentsline {subsection}{\numberline {2.6.2}Contrast Feature Redesign}{15}{subsection.2.6.2}%
+\contentsline {section}{\numberline {2.7}Scoring Architecture}{16}{section.2.7}%
+\contentsline {subsection}{\numberline {2.7.1}Dual-Model Rationale}{16}{subsection.2.7.1}%
+\contentsline {subsection}{\numberline {2.7.2}Score Fusion}{17}{subsection.2.7.2}%
+\contentsline {subsection}{\numberline {2.7.3}Cold-Start Scoring}{17}{subsection.2.7.3}%
+\contentsline {subsection}{\numberline {2.7.4}Conditional SHAP}{18}{subsection.2.7.4}%
+\contentsline {section}{\numberline {2.8}Decision Service}{18}{section.2.8}%
+\contentsline {subsection}{\numberline {2.8.1}Layer 1 --- Score Thresholds}{18}{subsection.2.8.1}%
+\contentsline {subsection}{\numberline {2.8.2}Layer 2 --- Regulatory Rule Escalation}{19}{subsection.2.8.2}%
+\contentsline {subsection}{\numberline {2.8.3}Layer 3 --- Risk History Adjustment}{19}{subsection.2.8.3}%
+\contentsline {subsection}{\numberline {2.8.4}Explanation Assembly}{20}{subsection.2.8.4}%
+\contentsline {section}{\numberline {2.9}Software Architecture}{20}{section.2.9}%
+\contentsline {chapter}{\numberline {3}Synthetic Data Engineering}{22}{chapter.3}%
+\contentsline {section}{\numberline {3.1}Source Extraction Methodology}{22}{section.3.1}%
+\contentsline {section}{\numberline {3.2}Source Extractions}{23}{section.3.2}%
+\contentsline {subsection}{\numberline {3.2.1}S1 --- PaySim}{23}{subsection.3.2.1}%
+\contentsline {subsection}{\numberline {3.2.2}S2 --- Amen Bank 2023 Annual Report}{23}{subsection.3.2.2}%
+\contentsline {subsection}{\numberline {3.2.3}S3 --- CTAF 2021 Annual Report}{24}{subsection.3.2.3}%
+\contentsline {subsection}{\numberline {3.2.4}Known Gap --- BCT Circulars}{24}{subsection.3.2.4}%
+\contentsline {section}{\numberline {3.3}Client Archetype Design}{25}{section.3.3}%
+\contentsline {subsection}{\numberline {3.3.1}Regulatory Discovery --- Law n°41-2024}{25}{subsection.3.3.1}%
+\contentsline {section}{\numberline {3.4}Generator Architecture}{25}{section.3.4}%
+\contentsline {subsection}{\numberline {3.4.1}Branch-Linked Employee Assignment}{26}{subsection.3.4.1}%
+\contentsline {section}{\numberline {3.5}Anomaly Scenario Design}{27}{section.3.5}%
+\contentsline {section}{\numberline {3.6}Data Validation}{27}{section.3.6}%
+\contentsline {subsection}{\numberline {3.6.1}Oracle Profile Shortcut}{28}{subsection.3.6.1}%
+\contentsline {chapter}{\numberline {4}Model Training and Evaluation}{30}{chapter.4}%
+\contentsline {section}{\numberline {4.1}Data Preparation}{30}{section.4.1}%
+\contentsline {subsection}{\numberline {4.1.1}Temporal Split}{30}{subsection.4.1.1}%
+\contentsline {subsection}{\numberline {4.1.2}Class Imbalance}{31}{subsection.4.1.2}%
+\contentsline {section}{\numberline {4.2}Autoencoder}{31}{section.4.2}%
+\contentsline {subsection}{\numberline {4.2.1}Architecture}{31}{subsection.4.2.1}%
+\contentsline {subsection}{\numberline {4.2.2}Anomaly Scoring}{31}{subsection.4.2.2}%
+\contentsline {section}{\numberline {4.3}LSTM}{32}{section.4.3}%
+\contentsline {subsection}{\numberline {4.3.1}Architecture}{32}{subsection.4.3.1}%
+\contentsline {subsection}{\numberline {4.3.2}Anomaly Scoring}{32}{subsection.4.3.2}%
+\contentsline {subsection}{\numberline {4.3.3}Sequence Construction}{32}{subsection.4.3.3}%
+\contentsline {section}{\numberline {4.4}Initial Training Failure and Root Cause Analysis}{32}{section.4.4}%
+\contentsline {subsection}{\numberline {4.4.1}Diagnosis}{33}{subsection.4.4.1}%
+\contentsline {subsection}{\numberline {4.4.2}Resolution}{33}{subsection.4.4.2}%
+\contentsline {section}{\numberline {4.5}Post-Rebuild Results}{34}{section.4.5}%
+\contentsline {subsection}{\numberline {4.5.1}Per-Scenario Analysis}{34}{subsection.4.5.1}%
+\contentsline {subsection}{\numberline {4.5.2}Complementary Detection Profiles}{35}{subsection.4.5.2}%
+\contentsline {section}{\numberline {4.6}Framing for Production Deployment}{35}{section.4.6}%
+\contentsline {subsection}{\numberline {4.6.1}Multi-Mechanism Convergence: Smurfing as Case Study}{35}{subsection.4.6.1}%
+\contentsline {chapter}{\numberline {5}Streaming Pipeline and Integration}{37}{chapter.5}%
+\contentsline {section}{\numberline {5.1}Streaming Topology}{37}{section.5.1}%
+\contentsline {subsection}{\numberline {5.1.1}Broker Choice: RedPanda}{38}{subsection.5.1.1}%
+\contentsline {subsection}{\numberline {5.1.2}Consumer Groups and Offset Management}{38}{subsection.5.1.2}%
+\contentsline {section}{\numberline {5.2}Core Extraction Pattern}{38}{section.5.2}%
+\contentsline {subsection}{\numberline {5.2.1}Core Modules}{39}{subsection.5.2.1}%
+\contentsline {subsection}{\numberline {5.2.2}Thin Streaming Wrappers}{39}{subsection.5.2.2}%
+\contentsline {section}{\numberline {5.3}Dead Letter Queue and Fault Tolerance}{39}{section.5.3}%
+\contentsline {subsection}{\numberline {5.3.1}Failure Classification}{39}{subsection.5.3.1}%
+\contentsline {paragraph}{Poison pills}{39}{paragraph*.19}%
+\contentsline {paragraph}{Transient failures}{40}{paragraph*.20}%
+\contentsline {subsection}{\numberline {5.3.2}ResilientConsumer}{40}{subsection.5.3.2}%
+\contentsline {subsection}{\numberline {5.3.3}Structured Logging}{41}{subsection.5.3.3}%
+\contentsline {section}{\numberline {5.4}Enrichment Service}{41}{section.5.4}%
+\contentsline {subsection}{\numberline {5.4.1}Data Sources}{41}{subsection.5.4.1}%
+\contentsline {subsection}{\numberline {5.4.2}Feature Computation}{42}{subsection.5.4.2}%
+\contentsline {subsection}{\numberline {5.4.3}Amount Statistics Fallback Chain}{42}{subsection.5.4.3}%
+\contentsline {subsection}{\numberline {5.4.4}Sequence Buffer Management}{42}{subsection.5.4.4}%
+\contentsline {section}{\numberline {5.5}Scoring Service}{43}{section.5.5}%
+\contentsline {subsection}{\numberline {5.5.1}Score Fusion}{43}{subsection.5.5.1}%
+\contentsline {subsection}{\numberline {5.5.2}Cold-Start Guard}{43}{subsection.5.5.2}%
+\contentsline {subsection}{\numberline {5.5.3}Conditional SHAP}{44}{subsection.5.5.3}%
+\contentsline {section}{\numberline {5.6}Decision Service}{44}{section.5.6}%
+\contentsline {subsection}{\numberline {5.6.1}Alert Tier Assignment}{44}{subsection.5.6.1}%
+\contentsline {subsection}{\numberline {5.6.2}Regulatory Rules}{44}{subsection.5.6.2}%
+\contentsline {subsection}{\numberline {5.6.3}Cold-Start Tier Cap}{45}{subsection.5.6.3}%
+\contentsline {section}{\numberline {5.7}Sink Consumers}{45}{section.5.7}%
+\contentsline {subsection}{\numberline {5.7.1}Raw Events Sink}{45}{subsection.5.7.1}%
+\contentsline {subsection}{\numberline {5.7.2}Decisions Sink}{46}{subsection.5.7.2}%
+\contentsline {subsection}{\numberline {5.7.3}Deliberate FK Omission}{46}{subsection.5.7.3}%
+\contentsline {section}{\numberline {5.8}Data Persistence Layer}{46}{section.5.8}%
+\contentsline {subsection}{\numberline {5.8.1}Master Tables}{48}{subsection.5.8.1}%
+\contentsline {subsection}{\numberline {5.8.2}Transaction and Event Tables}{49}{subsection.5.8.2}%
+\contentsline {subsection}{\numberline {5.8.3}Alerts Table}{50}{subsection.5.8.3}%
+\contentsline {subsection}{\numberline {5.8.4}Profile and Baseline Tables}{50}{subsection.5.8.4}%
+\contentsline {section}{\numberline {5.9}Batch Integration}{51}{section.5.9}%
+\contentsline {subsection}{\numberline {5.9.1}Nightly Profile Rebuild}{52}{subsection.5.9.1}%
+\contentsline {subsection}{\numberline {5.9.2}Feature Parity Guarantee}{52}{subsection.5.9.2}%
+\contentsline {subsection}{\numberline {5.9.3}Streaming--Batch Coordination}{52}{subsection.5.9.3}%
+\contentsline {chapter}{\numberline {6}MLOps, Observability, and Production Readiness}{54}{chapter.6}%
+\contentsline {section}{\numberline {6.1}MLOps Lifecycle Overview}{54}{section.6.1}%
+\contentsline {section}{\numberline {6.2}Experiment Tracking with MLflow}{55}{section.6.2}%
+\contentsline {subsection}{\numberline {6.2.1}Server Configuration}{55}{subsection.6.2.1}%
+\contentsline {subsection}{\numberline {6.2.2}Training Job Structure}{55}{subsection.6.2.2}%
+\contentsline {section}{\numberline {6.3}Model Promotion Gate}{55}{section.6.3}%
+\contentsline {subsection}{\numberline {6.3.1}Promotion Logic}{56}{subsection.6.3.1}%
+\contentsline {subsection}{\numberline {6.3.2}Scope and Limitations}{56}{subsection.6.3.2}%
+\contentsline {section}{\numberline {6.4}Orchestration with Apache Airflow}{56}{section.6.4}%
+\contentsline {subsection}{\numberline {6.4.1}Airflow Infrastructure}{57}{subsection.6.4.1}%
+\contentsline {subsection}{\numberline {6.4.2}Weekly Retrain DAG}{57}{subsection.6.4.2}%
+\contentsline {subsection}{\numberline {6.4.3}Training Isolation with DockerOperator}{57}{subsection.6.4.3}%
+\contentsline {section}{\numberline {6.5}Retraining Triggers}{58}{section.6.5}%
+\contentsline {subsection}{\numberline {6.5.1}Scheduled Retraining}{58}{subsection.6.5.1}%
+\contentsline {subsection}{\numberline {6.5.2}Drift-Triggered Retraining}{58}{subsection.6.5.2}%
+\contentsline {subsection}{\numberline {6.5.3}Feedback-Triggered Retraining}{59}{subsection.6.5.3}%
+\contentsline {section}{\numberline {6.6}Supervisor Feedback Loop}{60}{section.6.6}%
+\contentsline {subsection}{\numberline {6.6.1}Feedback Divergence DAG}{60}{subsection.6.6.1}%
+\contentsline {subsection}{\numberline {6.6.2}Three Triggers, One Pipeline}{60}{subsection.6.6.2}%
+\contentsline {section}{\numberline {6.7}Observability and Monitoring}{61}{section.6.7}%
+\contentsline {subsection}{\numberline {6.7.1}Service Metrics}{61}{subsection.6.7.1}%
+\contentsline {subsection}{\numberline {6.7.2}Failure Domain Separation}{61}{subsection.6.7.2}%
+\contentsline {subsection}{\numberline {6.7.3}Structured Logging}{61}{subsection.6.7.3}%
+\contentsline {chapter}{\numberline {7}Dashboard and Results}{63}{chapter.7}%
+\contentsline {section}{\numberline {7.1}Dashboard Architecture}{63}{section.7.1}%
+\contentsline {subsection}{\numberline {7.1.1}Why the Dashboard Cannot Consume Kafka Directly}{63}{subsection.7.1.1}%
+\contentsline {subsection}{\numberline {7.1.2}Data Access Pattern}{63}{subsection.7.1.2}%
+\contentsline {subsection}{\numberline {7.1.3}Real-Time Refresh}{64}{subsection.7.1.3}%
+\contentsline {subsection}{\numberline {7.1.4}Navigation Structure}{64}{subsection.7.1.4}%
+\contentsline {section}{\numberline {7.2}Alerts Page}{64}{section.7.2}%
+\contentsline {subsection}{\numberline {7.2.1}Filtering and List View}{64}{subsection.7.2.1}%
+\contentsline {subsection}{\numberline {7.2.2}Alert Detail}{65}{subsection.7.2.2}%
+\contentsline {subsection}{\numberline {7.2.3}Supervisor Feedback}{65}{subsection.7.2.3}%
+\contentsline {section}{\numberline {7.3}KPIs Page}{65}{section.7.3}%
+\contentsline {section}{\numberline {7.4}Simulation Page}{66}{section.7.4}%
+\contentsline {section}{\numberline {7.5}Health Page}{66}{section.7.5}%
+\contentsline {section}{\numberline {7.6}Pipeline Validation and Results}{67}{section.7.6}%
+\contentsline {subsection}{\numberline {7.6.1}Score Distribution}{67}{subsection.7.6.1}%
+\contentsline {subsection}{\numberline {7.6.2}Model Performance}{67}{subsection.7.6.2}%
+\contentsline {subsection}{\numberline {7.6.3}Synthetic Data Caveat}{68}{subsection.7.6.3}%
+\contentsline {chapter}{\numberline {8}Production Roadmap }{69}{chapter.8}%
+\contentsline {section}{\numberline {8.1}Container Orchestration with Kubernetes}{69}{section.8.1}%
+\contentsline {section}{\numberline {8.2}Continuous Integration and Deployment}{69}{section.8.2}%
+\contentsline {section}{\numberline {8.3}Secrets Management}{70}{section.8.3}%
+\contentsline {section}{\numberline {8.4}Load Testing}{70}{section.8.4}%
+\contentsline {section}{\numberline {8.5}Data Retention and Archival}{71}{section.8.5}%
+\contentsline {chapter}{General Conclusion}{72}{chapter*.37}%
+\contentsline {chapter}{\numberline {A}Enriched Feature Schema}{75}{appendix.A}%
+\contentsline {chapter}{\numberline {B}Docker Compose Service Inventory}{77}{appendix.B}%

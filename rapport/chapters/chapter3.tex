@@ -1,0 +1,347 @@
+This chapter describes the construction of the synthetic training dataset, from
+regulatory source extraction through archetype design to a fully operational
+generator producing labeled transactions. In the absence of real transaction data
+--- a common constraint in banking anomaly detection projects --- the quality of
+the synthetic data determines the ceiling of model performance.
+
+% ═══════════════════════════════════════════════════════════
+\section{Source Extraction Methodology}
+% ═══════════════════════════════════════════════════════════
+
+The synthetic generator requires two classes of calibration data: parameters
+describing the \textit{normal population} (how legitimate clients transact) and
+patterns describing the \textit{flagged population} (what suspicious activity looks
+like). No single source covers both, so a multi-source extraction strategy was
+designed.
+
+A structured extraction template was developed with seven trust dimensions
+--- recency, authority, peer review, information volume, geographic relevance,
+data type, and reproducibility --- each scored as Strong, Medium, or Weak. A
+nine-dimension coverage matrix evaluates each source's contribution to the
+generator's needs: amount distribution, operation type mix, transaction frequency,
+inter-event time, temporal patterns, spatial/branch patterns, channel mix,
+beneficiary/emitter known-rate, and operation sequence patterns. The last dimension
+was added specifically for the LSTM, which requires cross-operation temporal
+ordering to learn sequential anomalies.
+
+Three sources were extracted using this template. A fourth (BCT circulars on
+internal LAB/FT control) was identified but confirmed as restricted documents
+not publicly available, documented as a known gap.
+
+% ═══════════════════════════════════════════════════════════
+\section{Source Extractions}
+% ═══════════════════════════════════════════════════════════
+
+\subsection{S1 --- PaySim}
+
+PaySim is a synthetic mobile-money simulator based on real transaction logs from
+an undisclosed African mobile-money provider. Its trust profile is 2~Strong (peer
+review, reproducibility), 4~Medium, and 1~Weak (geographic relevance --- mobile
+money in sub-Saharan Africa differs structurally from branch teller banking in
+Tunisia).
+
+PaySim's primary role is as a \textbf{beneficiary graph structure} source: the
+dataset's agent-to-agent transfer network provides the best available model for
+counterparty relationship patterns. Its secondary role is amount distribution
+shape and day-of-month seasonality calibration. Operation mapping is direct for
+three of four operations (\texttt{CASH\_OUT}~$\leftrightarrow$~retrait,
+\texttt{CASH\_IN}~$\leftrightarrow$~versement,
+\texttt{TRANSFER}~$\leftrightarrow$~virement). The largest gap is
+\textbf{cheque}, which has no PaySim equivalent --- check-based operations are
+absent from mobile-money ecosystems entirely.
+
+The PaySim anomaly base rate of approximately 0.13\% was retained as the initial
+calibration anchor for the generator's anomaly injection rate.
+
+\subsection{S2 --- Amen Bank 2023 Annual Report}
+
+The Amen Bank annual report provides \textbf{normal population calibration} ---
+who the clients are and what the bank's infrastructure looks like. The document
+has an internal two-tier trust structure: Tier~1 comprises audited financial
+statements (signed by BDO Tunisie and La Générale d'Audit et Conseil), while
+Tier~2 covers unaudited management narrative. This distinction guided which
+figures were treated as hard constraints versus directional indicators.
+
+Key extractions:
+
+\begin{itemize}[leftmargin=2cm]
+    \item \textbf{Client deposit composition:} 61\% individuals, 33\% private
+          businesses, 6\% institutional. This directly calibrates the five
+          archetype population proportions.
+    \item \textbf{Branch network:} 150 branches across 9 geographic zones,
+          establishing the branch pool size and zone structure.
+    \item \textbf{Employee structure:} 1,139 total employees, 60.5\%
+          network-assigned. Combined with the 150-branch figure, this yields
+          the approximation of 2 tellers per branch used throughout the system.
+    \item \textbf{Existing AI-AML system:} The report confirms Amen Bank already
+          operates an AI-based AML system for bank-wide compliance reporting. This
+          validates the project's positioning as a complementary system, not a
+          replacement.
+\end{itemize}
+
+\subsection{S3 --- CTAF 2021 Annual Report}
+
+The CTAF (Commission Tunisienne des Analyses Financières) annual report provides
+\textbf{flagged population calibration} --- what suspicious operations look like
+in the Tunisian regulatory context. Four typological case studies were extracted
+using a structured 7-field template:
+
+\begin{itemize}[leftmargin=2cm]
+    \item \textbf{Case 1} (espèces-heavy structuring): Multiple versements just
+          below the 10,000~DT reporting threshold, dispersed across branches.
+          Informed the near-threshold ratio feature and the smurfing anomaly
+          scenario design.
+
+    \item \textbf{Case 2} (virement chain): Series of virements to unknown
+          beneficiaries with round amounts. Informed first-time beneficiary
+          detection and round-amount flagging logic in the Decision Service.
+
+    \item \textbf{Case 3} (PPE exploitation): Politically exposed person used as
+          a fund conduit. Validated the design decision to treat PPE as a
+          structural flag layered on archetypes rather than a separate archetype.
+
+    \item \textbf{Case 4} (remise de chèques laundering): Third-party cheques
+          deposited in rapid succession. Informed cumulative amount tracking and
+          cheque-specific anomaly patterns.
+\end{itemize}
+
+Six quantitative structural targets were also extracted: instrument co-occurrence
+rates (espèces 68\%, virement 56\%, chèque 34\%), BBE (Billets de Banque
+Étrangers) concentration around the 10,000~DT threshold (85\% of operations in
+the 5,000--20,000~DT band), and predicate offence taxonomy (contrebande 20\%,
+corruption 19\%, escroquerie 11\%).
+
+An important calibration distinction: the Amen Bank report describes the normal
+population (${>}99\%$ legitimate operations), while the CTAF report describes the
+flagged population (${<}1\%$ that should trigger alerts). The synthetic generator
+requires both distributions.
+
+\subsection{Known Gap --- BCT Circulars}
+
+BCT (Banque Centrale de Tunisie) circulars 2018-09, 2017-08, and 2021-05 would
+have provided exhaustive regulatory threshold enumeration for internal LAB/FT
+controls. These documents are restricted and not publicly available. The gap is
+documented rather than papered over: the Decision Service's regulatory rules are
+based on the thresholds extractable from the CTAF case studies and Law~n°41-2024,
+not a complete BCT circular inventory.
+
+% ═══════════════════════════════════════════════════════════
+\section{Client Archetype Design}
+% ═══════════════════════════════════════════════════════════
+
+Five client archetypes were designed across six behavioral dimensions, calibrated
+using the deposit composition data from S2 (Amen Bank annual report):
+
+\begin{table}[H]
+\centering
+\caption{Client archetypes}
+\label{tab:archetypes}
+\begin{tabular}{@{}lcccl@{}}
+\toprule
+\textbf{Archetype} & \textbf{Population} & \textbf{Dominant Op.} &
+\textbf{Monthly Vol.} & \textbf{Amount Range (DT)} \\
+\midrule
+Salaried      & 49\% & Retrait (50\%)    & $\sim$5.7  & 200--500 \\
+Small Business & 33\% & Versement (55\%)  & $\sim$37.5 & 500--2,000 \\
+Student       & 5\%  & Retrait (95\%)    & $\sim$7.2  & 40--80 \\
+Retiree       & 7\%  & Retrait/Virement  & $\sim$3.2  & 200--500 \\
+Big Business  & 6\%  & Virement (78\%)   & $\sim$63   & 2,000--20,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Population proportions are derived from the 61\% individual / 33\% private
+business / 6\% institutional split, with the individual segment subdivided
+approximately 80\% salaried, 12\% retiree, 8\% student. The six behavioral
+dimensions per archetype are: operation mix (probability distribution over
+four operations), transaction frequency (mean and standard deviation per
+operation per month), timing (preferred day of month), amount ranges (mean
+and standard deviation per operation), counterparty loyalty (probability
+of transacting with a known beneficiary/emitter), and branch loyalty
+(probability of using the home branch).
+
+All archetype parameters are externalized in a YAML configuration file,
+enabling recalibration without code changes.
+
+\subsection{Regulatory Discovery --- Law n°41-2024}
+
+During archetype calibration, a regulatory discovery was made: Law~n°41-2024
+(effective February 2025) caps individual cheques at 30,000~DT. BCT Q1~2026
+data confirms a 24.9\% collapse in cheque usage volume following this law.
+This required revising the big business archetype: remise de chèques frequency
+dropped from approximately 12--15 per month to 2--4, with virement absorbing
+the difference. A new anomaly scenario --- cheque structuring just under the
+30,000~DT ceiling --- was added to the generator (see Section~\ref{sec:scenarios}).
+
+% ═══════════════════════════════════════════════════════════
+\section{Generator Architecture}
+% ═══════════════════════════════════════════════════════════
+
+The generator follows a \textbf{4-class, 2-phase} design that separates the
+behavioral model from the anomaly injection mechanism:
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{Archetype} (Layer 1): loads behavioral parameters from the
+          YAML configuration file. Defines population-level priors --- what a
+          ``typical salaried client'' looks like on average.
+
+    \item \textbf{Client} (Layer 2): samples a fixed personality from the
+          archetype prior via Gaussian sampling with clipping constraints.
+          Each client's parameters (personal amount mean, personal frequency,
+          personal preferred day) are drawn once at creation and remain fixed
+          for the client's lifetime. Operation mix probabilities are sampled
+          then normalized to sum to~1.
+
+    \item \textbf{Generator} (orchestrator): executes in two phases.
+          \textbf{Phase~1 (planning)} creates the client population, estimates
+          total event volume, and assigns anomaly scenarios to selected clients
+          with specific time windows and difficulty tiers.
+          \textbf{Phase~2 (generation)} ticks through each simulated day,
+          determines which clients transact (using a bell curve around their
+          preferred day), generates normal or anomalous events depending on
+          whether the client is in an active anomaly window, and produces the
+          final chronologically ordered dataset.
+
+    \item \textbf{Event} (inline): per-event noise application, payload
+          construction based on operation type, branch selection respecting
+          branch loyalty, and employee assignment from the visited branch's
+          pool.
+\end{enumerate}
+
+The two-phase approach is essential for controlled anomaly injection. Hard-tier
+scenarios like smurfing span 21 days and require sufficient normal history before
+the anomaly window for the LSTM to have learned the client's baseline. Planning
+the anomaly windows before generation ensures this temporal constraint is
+respected.
+
+\subsection{Branch-Linked Employee Assignment}
+
+A critical data quality requirement: each employee is assigned to exactly one
+branch (2 employees per branch, 300 total across 150 branches). The initial
+implementation assigned employees from a global pool, allowing the same employee
+to appear at multiple branches --- a physical impossibility in branch banking.
+This was identified as a bug that contaminated the
+\texttt{repeated\_client\_employee} anomaly scenario: the scenario requires a
+specific client to visit a specific teller at a specific branch repeatedly, which
+is meaningless if the teller can appear anywhere. After fixing employee assignment
+to be branch-linked, the LSTM's AUC improved from 0.9430 to 0.9866 because
+branch-linked employees produce cleaner sequential patterns.
+
+% ═══════════════════════════════════════════════════════════
+\section{Anomaly Scenario Design}
+\label{sec:scenarios}
+% ═══════════════════════════════════════════════════════════
+
+Nine anomaly scenarios are organized across three difficulty tiers, reflecting
+the detection challenge they present. Difficulty is defined by how many features
+an anomaly modifies and over what time horizon.
+
+\begin{table}[H]
+\centering
+\caption{Anomaly scenarios by difficulty tier}
+\label{tab:anomaly-scenarios}
+\begin{tabular}{@{}llp{6.5cm}l@{}}
+\toprule
+\textbf{Tier} & \textbf{Scenario} & \textbf{Description} & \textbf{Actor} \\
+\midrule
+\multirow{3}{*}{Easy (1 day)}
+    & Amount spike      & Single transaction 5--10$\times$ client mean
+                        & Client \\
+    & Round amount      & Large round amount (5,000--20,000~DT)
+                        & Client \\
+    & Duplicate virement & Matching virement within short window
+                        & Client \\
+\midrule
+\multirow{3}{*}{Medium (5 days)}
+    & Frequency burst   & Transaction rate $>3\times$ daily average
+                        & Client \\
+    & Cumulative threshold & 24h/48h cumulative exceeds norm
+                        & Client \\
+    & Timing anomaly    & Transactions outside branch hours
+                        & Client \\
+\midrule
+\multirow{3}{*}{Hard (21 days)}
+    & Smurfing          & Versements in 8,000--9,800~DT range, multiple branches
+                        & Client \\
+    & Cheque structuring & Cheques near 30,000~DT ceiling (Law n°41-2024)
+                        & Client \\
+    & Repeated client-employee & Same client-teller pair $\geq$3 in 24h
+                        & Cross \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each scenario was validated for \textbf{feature-space detectability}: the injected
+anomaly must produce a measurable change in at least one of the 30 enriched
+features. Scenarios that modified only profile-level aggregates without affecting
+per-event features were removed during a mid-project audit (reduced from 13 to 9
+scenarios). For example, the original \texttt{behavioral\_drift} scenario gradually
+shifted a client's operation mix over 21 days, but this change was absorbed by the
+profile's 30-day distribution window and produced no detectable per-event signal.
+
+The difficulty distribution follows a pyramid: 10\% easy, 30\% medium, 60\% hard,
+reflecting the real-world observation that most suspicious activity is designed
+to evade detection.
+
+% ═══════════════════════════════════════════════════════════
+\section{Data Validation}
+% ═══════════════════════════════════════════════════════════
+
+The generator produces four CSV files per run:
+
+\begin{table}[H]
+\centering
+\caption{Generator output files}
+\label{tab:generator-output}
+\begin{tabular}{@{}llr@{}}
+\toprule
+\textbf{File} & \textbf{Content} & \textbf{Rows} \\
+\midrule
+\texttt{transactions.csv}      & All simulated events      & 243,904 \\
+\texttt{clients\_master.csv}   & Client reference data     & 10,000 \\
+\texttt{accounts.csv}          & Account reference data    & 10,000 \\
+\texttt{employees\_master.csv} & Employee reference data   & 300 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key validation metrics on the final dataset:
+
+\begin{table}[H]
+\centering
+\caption{Dataset validation}
+\label{tab:data-validation}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Total events         & 243,904 \\
+Anomaly rate         & 0.623\% (target: $\sim$0.13\%) \\
+Anomaly scenarios    & 9 (all represented) \\
+Unique clients       & 10,000 across 5 archetypes \\
+Employees            & 300 (2 per branch, branch-linked) \\
+Branches             & 150 \\
+Cross-branch employee violations & 0 \\
+Simulation period    & 180 days (January--June 2025) \\
+Salaried retrait mean & $\sim$300~DT (consistent with Tunisian salary) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The anomaly rate (0.623\%) is higher than the 0.13\% target from PaySim because
+multi-day anomaly windows (5 days for medium, 21 days for hard) produce multiple
+anomalous events per plan entry rather than one. This was accepted as a reasonable
+trade-off: the rate remains well within the class imbalance range where
+reconstruction-based and sequence-based models can learn effectively, and the
+evaluation metrics (AUC-ROC) are threshold-independent.
+
+\subsection{Oracle Profile Shortcut}
+
+For model training, client personality parameters are exported directly from the
+generator's in-memory objects to \texttt{clients\_master.csv}. This provides the
+exact behavioral baseline needed for contrast feature computation without requiring
+batch profile computation over the simulated transaction history. The oracle
+shortcut produces the same 30 enriched features as the production streaming
+pipeline, ensuring training-inference feature parity. In the production system,
+these baselines are replaced by batch-computed profiles from real transaction
+history --- the pipeline handles this substitution without code changes.

@@ -1,0 +1,75 @@
+This appendix lists the 30 enriched features computed by the Enrichment
+Service for each transaction event. These features constitute the input
+vector for both the Autoencoder and the LSTM models.
+
+\begin{longtable}{@{}rllp{6.5cm}@{}}
+\caption{Complete enriched feature schema (30 features)}
+\label{tab:full-feature-schema} \\
+\toprule
+\textbf{\#} & \textbf{Feature} & \textbf{Category} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{\#} & \textbf{Feature} & \textbf{Category} & \textbf{Description} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{4}{r}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+
+1  & \texttt{amount}                     & Raw event & Transaction amount in DT \\
+2  & \texttt{hour}                       & Raw event & Hour of day (0--23) \\
+3  & \texttt{is\_retrait}                & Raw event & One-hot: operation is retrait \\
+4  & \texttt{is\_versement}              & Raw event & One-hot: operation is versement \\
+5  & \texttt{is\_virement}               & Raw event & One-hot: operation is virement \\
+6  & \texttt{is\_cheque}                 & Raw event & One-hot: operation is remise de chèques \\
+7  & \texttt{is\_home\_branch}           & Raw event & 1 if transaction at client's home branch \\
+\midrule
+
+8  & \texttt{z\_amount}                  & Amount contrast & $(x - \mu_{30d}) / \sigma_{30d}$ for this operation type \\
+9  & \texttt{amount\_to\_mean\_ratio}    & Amount contrast & $x / \mu_{30d}$ for this operation type \\
+10 & \texttt{is\_above\_threshold}       & Amount contrast & 1 if amount $\geq$ 10{,}000 DT \\
+11 & \texttt{is\_near\_threshold}        & Amount contrast & 1 if amount $\in$ [8{,}000, 9{,}999] DT \\
+12 & \texttt{is\_round\_amount}          & Amount contrast & 1 if amount mod 1{,}000 $=$ 0 \\
+13 & \texttt{is\_near\_cheque\_ceiling}  & Amount contrast & 1 if cheque amount $\in$ [25{,}000, 29{,}999] DT \\
+\midrule
+
+14 & \texttt{op\_type\_probability}      & Operation contrast & Client's 30d frequency ratio for this operation type \\
+\midrule
+
+15 & \texttt{is\_outside\_hours}         & Timing contrast & 1 if hour $\notin$ [8, 16] \\
+16 & \texttt{day\_distance\_from\_preferred} & Timing contrast & $|$day of month $-$ client's preferred day$|$ \\
+\midrule
+
+17 & \texttt{is\_new\_counterparty}      & Counterparty contrast & 1 if beneficiary/emitter not in known set \\
+\midrule
+
+18 & \texttt{tx\_count\_24h}             & Velocity & Client transactions in last 24 hours \\
+19 & \texttt{tx\_count\_7d}              & Velocity & Client transactions in last 7 days \\
+20 & \texttt{cumulative\_amount\_24h}    & Velocity & Sum of client amounts in last 24 hours \\
+21 & \texttt{has\_duplicate\_recent}     & Velocity & 1 if same amount + operation in last 24h \\
+22 & \texttt{near\_threshold\_count\_7d} & Velocity & Events in [8k, 10k) DT band in last 7 days \\
+\midrule
+
+23 & \texttt{employee\_tx\_count\_24h}          & Employee & Employee's transaction count in last 24h \\
+24 & \texttt{same\_employee\_client\_count\_24h} & Employee & Times this employee served this client in 24h \\
+\midrule
+
+25 & \texttt{is\_salaried}               & Context & One-hot: archetype is salaried \\
+26 & \texttt{is\_small\_business}        & Context & One-hot: archetype is small business \\
+27 & \texttt{is\_student}                & Context & One-hot: archetype is student \\
+28 & \texttt{is\_retiree}                & Context & One-hot: archetype is retiree \\
+29 & \texttt{is\_big\_business}          & Context & One-hot: archetype is big business \\
+30 & \texttt{account\_age\_days}         & Context & Days since account opening \\
+
+\end{longtable}
+
+Features 8--9 use a three-level fallback chain when statistics are
+unavailable for the current operation type: 30-day statistics, then
+90-day statistics, then the archetype baseline. Feature~13 applies only
+to cheque operations and is zero for all other operation types.
+Features~18--22 are computed from the Redis rolling buffer, not from the
+PostgreSQL profile, ensuring they reflect the most recent events with
+sub-second latency.

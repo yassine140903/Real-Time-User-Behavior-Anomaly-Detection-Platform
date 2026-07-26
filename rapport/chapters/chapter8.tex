@@ -1,0 +1,114 @@
+This chapter documents the enhancements that would be required to transition
+the platform from its current Docker Compose deployment to a
+production-grade banking environment.
+
+% ═══════════════════════════════════════════════════════════
+\section{Container Orchestration with Kubernetes}
+\label{sec:kubernetes}
+% ═══════════════════════════════════════════════════════════
+
+The current deployment runs 20 Docker Compose services on a single host.
+This is sufficient for development and demonstration, but a production
+deployment requires horizontal scaling, automatic failover, and
+resource-aware scheduling across multiple nodes.
+
+Kubernetes would replace Docker Compose as the orchestration layer. Each
+streaming service (enrichment, scoring, decision) would run as a Deployment
+with configurable replica counts, allowing the system to scale horizontally
+under increased transaction volume. Health checks already exposed by the
+Prometheus metrics endpoints can serve as Kubernetes liveness and readiness
+probes with no code changes. The model volume mount --- currently a shared
+Docker volume --- would migrate to a Persistent Volume Claim, preserving
+the retrain-without-rebuild pattern established in
+Chapter~\ref{ch:mlops}.
+
+RedPanda, Redis, and PostgreSQL would each run as StatefulSets with
+persistent storage, or be replaced by managed cloud equivalents depending
+on the bank's infrastructure policy.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Continuous Integration and Deployment}
+\label{sec:cicd}
+% ═══════════════════════════════════════════════════════════
+
+The project currently has no automated CI/CD pipeline. Code changes are
+tested manually and deployed by rebuilding Docker images. A production
+pipeline would introduce three stages:
+
+\begin{enumerate}
+    \item \textbf{Continuous Integration} --- on every commit, run unit
+          tests for the three core modules (EnrichmentCore, ScoringCore,
+          DecisionCore), validate that the feature computation produces
+          the expected 30-dimensional output, and lint the codebase.
+    \item \textbf{Image Build} --- on merge to the main branch, build and
+          tag Docker images for each service with the commit hash,
+          ensuring traceability between deployed code and source control.
+    \item \textbf{Staged Deployment} --- deploy to a staging environment
+          first, run the E2E test script against the staging pipeline,
+          and promote to production only after validation passes.
+\end{enumerate}
+
+The core extraction pattern (Chapter~\ref{ch:streaming}) simplifies CI
+significantly: the pure core modules can be unit-tested without Redis,
+PostgreSQL, or RedPanda dependencies, covering the majority of the
+business logic with fast, isolated tests.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Secrets Management}
+\label{sec:secrets}
+% ═══════════════════════════════════════════════════════════
+
+Database credentials, API keys, and the Airflow REST API password are
+currently stored in a \texttt{.env} file excluded from version control
+via \texttt{.gitignore}. This is adequate for a single-developer
+environment but insufficient for production, where secrets must be
+rotated, audited, and never stored on disk in plaintext.
+
+A secrets management solution such as HashiCorp Vault or cloud-native
+equivalents (AWS Secrets Manager, Azure Key Vault) would provide
+encrypted storage, automatic rotation, and access logging. Docker Compose
+secrets or Kubernetes Secrets would inject credentials at runtime,
+eliminating environment files entirely.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Load Testing}
+\label{sec:load-testing}
+% ═══════════════════════════════════════════════════════════
+
+The system has been validated with the synthetic dataset of 243,000 events
+replayed at accelerated speed, but it has not been tested under sustained
+production-equivalent load. A load testing phase would establish the
+throughput ceiling of each service, identify the first bottleneck in the
+pipeline, and determine the point at which consumer lag begins to
+accumulate.
+
+The existing event simulator can serve as the load generator with minimal
+modification: adjusting the inter-event delay to simulate peak branch
+hours across 150 branches. The Prometheus instrumentation
+(Section~\ref{sec:observability}) already captures the metrics needed to
+evaluate load test results --- throughput, p95 latency, and consumer lag
+--- without additional tooling.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Data Retention and Archival}
+\label{sec:data-retention}
+% ═══════════════════════════════════════════════════════════
+
+The current PostgreSQL schema retains all transactions and alerts
+indefinitely. In a production deployment, regulatory requirements and
+storage constraints necessitate a data retention policy. Tunisian banking
+regulations require that transaction records be preserved for a minimum
+period, after which they may be archived to cold storage or purged.
+
+A retention strategy would partition the \texttt{transactions} and
+\texttt{alerts} tables by month using PostgreSQL's native table
+partitioning, enabling efficient archival of older partitions to
+compressed cold storage while keeping recent data queryable at full
+speed. The batch profile rebuild
+(Chapter~\ref{ch:streaming}) would be scoped to the retention window
+rather than the full transaction history, reducing nightly computation
+time as the dataset grows.

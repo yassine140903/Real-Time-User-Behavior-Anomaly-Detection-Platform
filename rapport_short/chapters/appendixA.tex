@@ -1,0 +1,50 @@
+\chapter{Enriched Feature Schema}
+\label{app:features}
+
+The 30 features below are computed by the Enrichment Service for every transaction event and constitute the input vector for both the Autoencoder and the LSTM.
+
+\begin{longtable}{@{}rp{5.0cm}p{3.0cm}p{5.2cm}@{}}
+\caption{Complete enriched feature schema (30 features)}\\
+\toprule
+\# & \textbf{Feature} & \textbf{Category} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\toprule
+\# & \textbf{Feature} & \textbf{Category} & \textbf{Description} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+1 & \code{amount} & Raw event & Transaction amount in DT \\
+2 & \code{hour} & Raw event & Hour of day (0--23) \\
+3 & \code{is\_retrait} & Raw event & One-hot: operation is retrait \\
+4 & \code{is\_versement} & Raw event & One-hot: operation is versement \\
+5 & \code{is\_virement} & Raw event & One-hot: operation is virement \\
+6 & \code{is\_cheque} & Raw event & One-hot: operation is remise de ch\`eques \\
+7 & \code{is\_home\_branch} & Raw event & 1 if transaction at client's home branch \\
+8 & \code{z\_amount} & Amount contrast & $(x - \mu_{30d})/\sigma_{30d}$ for this operation type \\
+9 & \code{amount\_to\_mean\_ratio} & Amount contrast & $x/\mu_{30d}$ for this operation type \\
+10 & \code{is\_above\_threshold} & Amount contrast & 1 if amount $\geq$ 10{,}000~DT \\
+11 & \code{is\_near\_threshold} & Amount contrast & 1 if amount $\in$ [8{,}000, 9{,}999]~DT \\
+12 & \code{is\_round\_amount} & Amount contrast & 1 if amount mod 1{,}000 $=$ 0 \\
+13 & \code{is\_near\_cheque\_ceiling} & Amount contrast & 1 if cheque amount $\in$ [25{,}000, 29{,}999]~DT \\
+14 & \code{op\_type\_probability} & Operation contrast & Client's 30d frequency ratio for this operation \\
+15 & \code{is\_outside\_hours} & Timing contrast & 1 if hour $\notin$ [8, 16] \\
+16 & \code{day\_distance\_from\_preferred} & Timing contrast & $|$day of month $-$ preferred day$|$ \\
+17 & \code{is\_new\_counterparty} & Counterparty contrast & 1 if beneficiary/emitter not in known set \\
+18 & \code{tx\_count\_24h} & Velocity & Client transactions in last 24 hours \\
+19 & \code{tx\_count\_7d} & Velocity & Client transactions in last 7 days \\
+20 & \code{cumulative\_amount\_24h} & Velocity & Sum of client amounts in last 24 hours \\
+21 & \code{has\_duplicate\_recent} & Velocity & 1 if same amount + operation in last 24h \\
+22 & \code{near\_threshold\_count\_7d} & Velocity & Events in [8k, 10k)~DT band in last 7 days \\
+23 & \code{employee\_tx\_count\_24h} & Employee & Employee's transaction count in last 24h \\
+24 & \code{same\_employee\_client\_count\_24h} & Employee & Times this employee served this client in 24h \\
+25 & \code{is\_salaried} & Context & One-hot: archetype is salaried \\
+26 & \code{is\_small\_business} & Context & One-hot: archetype is small business \\
+27 & \code{is\_student} & Context & One-hot: archetype is student \\
+28 & \code{is\_retiree} & Context & One-hot: archetype is retiree \\
+29 & \code{is\_big\_business} & Context & One-hot: archetype is big business \\
+30 & \code{account\_age\_days} & Context & Days since account opening \\
+\end{longtable}
+
+Features 8--9 use a three-level fallback chain when statistics are unavailable for the current operation type: 30-day statistics, then 90-day, then the archetype baseline. Feature 13 applies only to cheque operations and is zero otherwise. Features 18--22 are computed from the Redis rolling buffer rather than the PostgreSQL profile, so they reflect the most recent events with sub-second latency.

@@ -1,0 +1,329 @@
+This chapter covers the machine learning pipeline: data preparation, model
+architectures, the diagnostic process that identified a fundamental feature
+engineering flaw, and the final model performance after the pipeline rebuild.
+
+% ═══════════════════════════════════════════════════════════
+\section{Data Preparation}
+% ═══════════════════════════════════════════════════════════
+
+\subsection{Temporal Split}
+
+A chronological split preserves the temporal ordering that the LSTM relies on.
+A random split would leak future events into the training set, producing
+artificially inflated validation metrics. The 180-day simulation period is
+divided as follows:
+
+\begin{table}[H]
+\centering
+\caption{Data split strategy}
+\label{tab:data-split}
+\begin{tabular}{@{}llrr@{}}
+\toprule
+\textbf{Split} & \textbf{Day Range} & \textbf{Events} & \textbf{Anomalies} \\
+\midrule
+Warm-up (discarded) & 1--21   & $\sim$28,000 & --- \\
+Train (normal only)  & 22--126  & 142,254 & 0 \\
+Validation           & 127--153 & 36,548  & 312 \\
+Test                 & 154--180 & 36,059  & 175 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The first 21 days are discarded as a warm-up period. During this window,
+client buffers are still populating and velocity features
+(\texttt{tx\_count\_24h}, \texttt{cumulative\_amount\_24h}) are unreliable.
+The Autoencoder training set contains \textbf{normal events only} ---
+anomalous events during the training window are excluded. This is the
+standard approach for reconstruction-based anomaly detection: the model
+learns what ``normal'' looks like, and any event it cannot reconstruct well
+is flagged as anomalous.
+
+A \texttt{StandardScaler} is fitted on the normal training data only and
+applied to all splits. The scaler is saved alongside the model for use
+during inference.
+
+\subsection{Class Imbalance}
+
+With an anomaly rate of 0.623\%, standard accuracy metrics are misleading
+(a model that predicts ``normal'' for every event achieves 99.4\% accuracy).
+AUC-ROC was chosen as the primary metric because it evaluates model
+performance across all possible thresholds, independent of the class
+distribution. Optuna hyperparameter searches use AUC-ROC as the objective
+function.
+
+% ═══════════════════════════════════════════════════════════
+\section{Autoencoder}
+% ═══════════════════════════════════════════════════════════
+
+\subsection{Architecture}
+
+The Autoencoder is a symmetric feedforward network that compresses the input
+feature vector into a low-dimensional bottleneck and reconstructs it:
+
+\begin{equation}
+30 \xrightarrow{\text{encoder}} 20 \xrightarrow{} 10
+\xrightarrow{\text{decoder}} 20 \xrightarrow{} 30
+\end{equation}
+
+The bottleneck dimension of 10 (one-third of input) provides enough capacity
+to represent the structure of normal behavior without allowing the network to
+learn an identity function. ReLU activations are used between layers. The
+model is trained with Adam optimizer (learning rate $10^{-3}$), batch size
+256, for 50 epochs with the best model selected by validation AUC.
+
+\subsection{Anomaly Scoring}
+
+The anomaly score is the \textbf{mean squared reconstruction error} between
+the input vector $\mathbf{x}$ and its reconstruction $\hat{\mathbf{x}}$:
+
+\begin{equation}
+s_{\text{ae}} = \frac{1}{d} \sum_{i=1}^{d} (x_i - \hat{x}_i)^2
+\end{equation}
+
+Normal events, which the model has learned to reconstruct accurately, produce
+low scores. Anomalous events, which deviate from the learned normal
+distribution, produce high reconstruction errors.
+
+% ═══════════════════════════════════════════════════════════
+\section{LSTM}
+% ═══════════════════════════════════════════════════════════
+
+\subsection{Architecture}
+
+The LSTM treats each client's transaction history as a temporal sequence.
+It takes the last 10 enriched events as input and predicts what the next
+event should look like:
+
+\begin{equation}
+\text{LSTM}(\text{input}=30, \text{hidden}=64, \text{layers}=2)
+\rightarrow \text{Linear}(64, 30)
+\end{equation}
+
+The input at each time step is a 30-dimensional feature vector (the enriched
+event). Two stacked LSTM layers process the sequence, and the final hidden
+state feeds into a linear projection that predicts the 30 features of the
+next event. The sequence length of 10 was chosen as a balance between
+capturing sufficient behavioral context and keeping inference latency low.
+
+\subsection{Anomaly Scoring}
+
+The anomaly score is the mean squared prediction error between the LSTM's
+predicted next event $\hat{\mathbf{y}}$ and the actual observed event
+$\mathbf{y}$:
+
+\begin{equation}
+s_{\text{lstm}} = \frac{1}{d} \sum_{i=1}^{d} (y_i - \hat{y}_i)^2
+\end{equation}
+
+An event that matches the LSTM's prediction (consistent with the client's
+behavioral history) produces a low score. An event that deviates from the
+predicted pattern produces a high score. This approach is particularly
+effective for detecting sequential anomalies --- patterns that appear normal
+in isolation but are unusual given the client's recent activity.
+
+\subsection{Sequence Construction}
+
+Sequences are constructed per client using a sliding window: for each event
+at position $t$ in a client's chronologically ordered history, the input
+is events $[t{-}10, \ldots, t{-}1]$ and the target is event $t$. Clients
+with fewer than 11 events are excluded from LSTM training. In the streaming
+pipeline, the sequence buffer is maintained in Redis and updated after each
+event.
+
+% ═══════════════════════════════════════════════════════════
+\section{Initial Training Failure and Root Cause Analysis}
+\label{sec:pipeline-rebuild}
+% ═══════════════════════════════════════════════════════════
+
+The initial training attempt used the 74-feature enriched event schema.
+Three Autoencoder configurations were evaluated via Optuna (71 features
+with mean MSE, 34 behavioral features, 71 features with max/top-k
+scoring). The best achieved AUC~0.577. The LSTM with multi-task prediction
+heads achieved AUC~0.564. Both results were near random, triggering a
+root cause investigation.
+
+\subsection{Diagnosis}
+
+Two independent root causes were identified:
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{Undetectable scenarios.} Several of the original 13
+          anomaly scenarios had stub implementations that did not produce
+          measurable changes in the enriched feature space. For instance,
+          \texttt{timing\_anomaly} shifted the event hour, but the enriched
+          event contained no per-event hour feature --- only a profile-level
+          hour distribution that absorbs single-event changes without
+          producing a detectable signal.
+
+    \item \textbf{Profile dominance.} The 74-feature enriched event was
+          dominated by raw profile field dumps --- weekly snapshot means,
+          standard deviations, and full distribution vectors that were
+          identical across every event from the same client within the
+          same week. The per-event signal was drowned out by profile noise.
+          Anomalous events looked nearly identical to normal events from
+          the same client because both carried the same profile values.
+\end{enumerate}
+
+\subsection{Resolution}
+
+Three components were redesigned simultaneously:
+
+\begin{itemize}[leftmargin=2cm]
+    \item \textbf{Generator:} anomaly scenarios reduced from 13 to 9, with
+          each remaining scenario validated for feature-space detectability
+          (see Section~\ref{sec:scenarios}).
+    \item \textbf{Enrichment:} complete redesign from profile dumps to
+          contrast features. Feature count dropped from 74 to 30, with
+          every feature measuring the deviation of the current event against
+          the client's baseline (see Section~\ref{sec:enriched-event-design}).
+    \item \textbf{Training data:} oracle profile shortcut introduced,
+          providing exact client baselines without weekly granularity
+          artifacts.
+\end{itemize}
+
+This was the single most impactful change in the project. The improvement
+was entirely structural --- the same model architectures and hyperparameters
+that produced AUC~0.57 on the 74-feature schema produced AUC~0.98+ on the
+30-feature contrast schema.
+
+% ═══════════════════════════════════════════════════════════
+\section{Post-Rebuild Results}
+% ═══════════════════════════════════════════════════════════
+
+After the pipeline rebuild, both models were retrained on the redesigned
+30-feature schema with branch-linked employees:
+
+\begin{table}[H]
+\centering
+\caption{Model performance comparison}
+\label{tab:model-performance}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Model} & \textbf{Initial AUC (74 feat.)} &
+\textbf{Rebuilt AUC (30 feat.)} & \textbf{Final AUC (aligned)} \\
+\midrule
+Autoencoder & 0.577 & 0.9853 & 0.9714 \\
+LSTM        & 0.564 & 0.9866 & 0.9355 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ``rebuilt'' column reflects training on the oracle profile shortcut (used
+during development). The ``final'' column reflects retraining on the
+production-aligned 30-feature schema where both streaming and batch
+pipelines call the same \texttt{\_compute\_features()} function. The AUC
+drop from rebuilt to final was expected: the Autoencoder's reconstruction
+error is less sensitive to input source differences, while the LSTM lost
+more because sequence modeling benefits from richer per-step representations.
+
+\subsection{Per-Scenario Analysis}
+
+\begin{table}[H]
+\centering
+\caption{Per-scenario detection performance (rebuilt models)}
+\label{tab:per-scenario}
+\begin{tabular}{@{}llcr@{}}
+\toprule
+\textbf{Scenario} & \textbf{Tier} & \textbf{AE AUC} & \textbf{LSTM AUC} \\
+\midrule
+Amount spike            & Easy   & 0.9998 & 0.9999 \\
+Round amount            & Easy   & 1.0000 & 1.0000 \\
+Duplicate virement      & Easy   & 0.9980 & --- \\
+Frequency burst         & Medium & 0.9983 & 0.9125 \\
+Cumulative threshold    & Medium & 0.9742 & 0.8540 \\
+Timing anomaly          & Medium & 0.9710 & --- \\
+Smurfing                & Hard   & 1.0000 & 0.9981 \\
+Cheque structuring      & Hard   & 1.0000 & 0.9999 \\
+Repeated client-employee & Hard  & 0.9983 & 0.9976 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+An unexpected finding: hard-tier scenarios produced higher AUC than
+medium-tier scenarios. This inversion occurs because hard scenarios (smurfing,
+cheque structuring) modify high-signal features like \texttt{z\_amount} and
+\texttt{is\_near\_threshold} with large deviations, while medium scenarios
+(frequency burst, cumulative threshold) produce subtler, multi-event patterns
+that require more context to detect. Difficulty classification reflects
+real-world detection challenge (deliberately subtle patterns), not model
+sensitivity.
+
+\subsection{Complementary Detection Profiles}
+
+The two models exhibit complementary strengths that justify the dual-model
+architecture:
+
+\begin{itemize}[leftmargin=2cm]
+    \item The \textbf{Autoencoder} excels at point anomalies visible in a
+          single event (amount spike, round amount, threshold proximity).
+          It produces high scores from the very first event, with no
+          sequence history required.
+    \item The \textbf{LSTM} excels at sequential patterns
+          (repeated client-employee interactions, behavioral sequences).
+          Its performance on medium-tier scenarios is lower because these
+          patterns span multiple events and require sufficient context.
+\end{itemize}
+
+% ═══════════════════════════════════════════════════════════
+\section{Framing for Production Deployment}
+% ═══════════════════════════════════════════════════════════
+
+These AUC values validate the system's ability to learn behavioral patterns
+and serve predictions end-to-end. They are \textbf{not} a production
+performance benchmark --- the models were trained on synthetic data whose
+statistical properties approximate but do not replicate real Amen Bank
+transaction distributions.
+
+The engineering argument is more important than the absolute numbers: the
+system is designed so that replacing synthetic data with real transactions
+requires only re-running the training pipeline. The same
+\texttt{\_compute\_features()} function, the same score fusion mechanism,
+the same decision rules, and the same retraining infrastructure handle real
+data without code changes. The pipeline is the deliverable, not the model
+weights.
+
+\subsection{Multi-Mechanism Convergence: Smurfing as Case Study}
+
+Smurfing illustrates how the three detection mechanisms converge on a single
+anomaly pattern. A smurfing scenario spans 21 days, but neither the
+Autoencoder (which sees one event at a time) nor the LSTM (which sees a
+10-event window) needs to observe the entire window to detect it.
+
+Each smurfing event arrives at the Scoring Service already enriched with
+velocity features computed from the rolling Redis buffer:
+\texttt{near\_threshold\_count\_7d} accumulates across the smurfing window,
+\texttt{cumulative\_amount\_24h} reflects recent activity, and
+\texttt{z\_amount} captures the deviation from the client's baseline. These
+features carry the behavioral \textit{history} into each event's feature
+vector, regardless of the model's own window size.
+
+The three mechanisms contribute distinct signals:
+
+\begin{enumerate}[leftmargin=2cm]
+    \item \textbf{Autoencoder:} each individual smurfing event is anomalous
+          in isolation --- a salaried client whose retrait average is 300~DT
+          suddenly performing 8,500~DT versements produces a high
+          reconstruction error from \texttt{z\_amount},
+          \texttt{amount\_to\_mean\_ratio}, and
+          \texttt{is\_near\_threshold} alone.
+
+    \item \textbf{LSTM:} the 10-event sequence shows escalating velocity
+          features (\texttt{near\_threshold\_count\_7d} climbing from 0 to
+          4, \texttt{tx\_count\_7d} rising) that deviate from the predicted
+          normal trajectory. The LSTM does not need to see the full 21-day
+          window --- it detects the \textit{acceleration} within its own
+          context.
+
+    \item \textbf{Decision Service Rule~2:} fires deterministically when
+          the amount falls in the 8,000--9,999~DT band \textit{and} the
+          client has $\geq$2 near-threshold transactions in 7 days.
+          This rule requires no ML inference and catches structuring
+          regardless of model scores.
+\end{enumerate}
+
+This convergence is not accidental --- it is a direct consequence of the
+contrast feature design. Because each enriched event carries both its own
+signal and the accumulated behavioral context from the rolling buffer, even
+a stateless model (the Autoencoder) can participate in detecting a
+multi-day pattern. The LSTM adds temporal sensitivity, and the regulatory
+rules provide a deterministic safety net.

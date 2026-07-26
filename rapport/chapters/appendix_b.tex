@@ -1,0 +1,83 @@
+This appendix lists all 20 Docker Compose services that constitute the
+deployed system.
+
+\begin{longtable}{@{}llcp{5cm}@{}}
+\caption{Docker Compose service inventory}
+\label{tab:docker-services} \\
+\toprule
+\textbf{Service} & \textbf{Image / Build} & \textbf{Port} & \textbf{Role} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Service} & \textbf{Image / Build} & \textbf{Port} & \textbf{Role} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{4}{r}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+
+\multicolumn{4}{l}{\textit{Infrastructure}} \\
+\midrule
+redpanda          & vectorized/redpanda      & 9092  & Kafka-compatible message broker \\
+redis             & redis:7                  & 6379  & Hot profile store and sequence buffers \\
+postgres          & postgres:17              & 5432  & Cold store, alerts, evaluation labels, Airflow metadata \\
+\midrule
+
+\multicolumn{4}{l}{\textit{Streaming Pipeline}} \\
+\midrule
+enrichment-service & Custom (Dockerfile.api) & 9100  & Enriches raw events with 30 contrast features \\
+scoring-service    & Custom (Dockerfile.api) & 9101  & AE + LSTM inference, score fusion, SHAP \\
+decision-service   & Custom (Dockerfile.api) & 9102  & Rule evaluation, tier assignment \\
+raw-events-sink    & Custom (Dockerfile.api) & ---   & Writes raw events to PostgreSQL \\
+decisions-sink     & Custom (Dockerfile.api) & ---   & Writes alerts to PostgreSQL and risk history to Redis \\
+\midrule
+
+\multicolumn{4}{l}{\textit{API and Dashboard}} \\
+\midrule
+simulation-api     & Custom (Dockerfile.api) & 8000  & FastAPI: scoring, feedback, health endpoints \\
+dashboard          & Custom (Dockerfile.api) & 8501  & Streamlit supervisor dashboard \\
+\midrule
+
+\multicolumn{4}{l}{\textit{Orchestration}} \\
+\midrule
+airflow-webserver  & Custom (Dockerfile.airflow) & 8080  & Airflow UI and REST API \\
+airflow-scheduler  & Custom (Dockerfile.airflow) & ---   & DAG scheduling (LocalExecutor) \\
+\midrule
+
+\multicolumn{4}{l}{\textit{MLOps}} \\
+\midrule
+mlflow             & ghcr.io/mlflow/mlflow   & 5001  & Experiment tracking, artifact store \\
+webhook-relay      & Custom (Dockerfile.webhook) & ---  & AlertManager $\rightarrow$ Airflow REST API bridge \\
+\midrule
+
+\multicolumn{4}{l}{\textit{Monitoring}} \\
+\midrule
+prometheus         & prom/prometheus          & 9090  & Metrics collection and alert rule evaluation \\
+alertmanager       & prom/alertmanager        & 9093  & Alert deduplication and webhook routing \\
+grafana            & grafana/grafana          & 3000  & Metrics visualization dashboards \\
+kafka-exporter     & danielqsj/kafka-exporter & 9308  & Broker-level metrics (consumer lag) \\
+\midrule
+
+\multicolumn{4}{l}{\textit{On-Demand (profile-gated)}} \\
+\midrule
+hydrate-redis      & Custom (Dockerfile.api) & ---   & Seeds Redis profiles from PostgreSQL at startup \\
+simulator          & Custom (Dockerfile.api) & ---   & Replays synthetic events into RedPanda \\
+
+\end{longtable}
+
+Services are organized into six functional groups. The three streaming
+pipeline services and two sink consumers form the real-time processing
+chain. Infrastructure services (RedPanda, Redis, PostgreSQL) are shared
+across all components. The on-demand services (\texttt{hydrate-redis}
+and \texttt{simulator}) run once at startup or on explicit invocation
+using Docker Compose profiles, and exit after completion.
+
+All custom services share a common \texttt{Dockerfile.api} base image
+except the Airflow containers (\texttt{Dockerfile.airflow}, which
+excludes PyTorch to save 2\,GB), the webhook relay
+(\texttt{Dockerfile.webhook}, a minimal \texttt{python:3.11-slim} image
+at approximately 150\,MB), and the training job (launched by the
+DockerOperator using a separate \texttt{amen-anomaly-training:latest}
+image not listed here, as it runs transiently during retraining).

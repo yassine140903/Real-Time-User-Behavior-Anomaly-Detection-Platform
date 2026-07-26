@@ -1,0 +1,341 @@
+This chapter presents the institutional context, the regulatory environment
+governing anti-money laundering in Tunisia, and a review of the anomaly
+detection techniques that inform the system design.
+
+% ═══════════════════════════════════════════════════════════
+\section{Host Institution}
+\label{sec:amen-bank}
+% ═══════════════════════════════════════════════════════════
+
+Amen Bank is a privately held Tunisian commercial bank operating under the
+supervision of the Banque Centrale de Tunisie (BCT). As of 2023, the bank
+operates 150 branches distributed across 9 geographic zones (Tunis~I
+through~IV, Cap~Bon, Sahel, Sfax, and South), supported by 5 Business
+Centers and 11 Self-Service Areas. The institution employs 1,139 staff
+members, of whom 60.5\% are assigned to the branch network and 39.5\% to
+head office functions.
+
+The internship was hosted by the \textbf{Direction Centrale du Système
+d'Information} (DCSI), specifically within the \textbf{Département des
+Projets Agence}, which is responsible for developing and maintaining the
+information systems that support branch-level operations.
+
+The bank's client base is composed of three economic segments: individuals
+(61\% of deposits), private businesses (33\%), and institutional clients
+(6\%). This composition, drawn from the audited 2023 annual report,
+directly informs the client archetype design described in
+Chapter~\ref{ch:synthetic}.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Branch Teller Operations}
+\label{sec:caisse-ops}
+% ═══════════════════════════════════════════════════════════
+
+The project scope covers four teller-window (\textit{guichet}) operations
+that constitute the core transactional activity of a retail bank branch:
+
+\begin{itemize}
+    \item \textbf{Retrait} (cash withdrawal) --- the client receives
+          physical currency from their account. Risk exposure includes
+          identity fraud, unusual withdrawal patterns, and excessive
+          amounts or frequency.
+    \item \textbf{Versement} (cash deposit) --- the client deposits
+          physical currency into their account. This operation is the
+          primary vector for structuring (\textit{smurfing}): deliberately
+          splitting a large sum into multiple deposits below the reporting
+          threshold.
+    \item \textbf{Virement} (bank transfer) --- funds are transferred from
+          the client's account to a beneficiary. Risks include transfers to
+          unknown beneficiaries, duplicate transactions, and amounts
+          inconsistent with the client's profile.
+    \item \textbf{Remise de chèques} (cheque deposit) --- the client
+          deposits one or more cheques for collection. Risks include
+          cheques from unknown emitters, amounts inconsistent with
+          client history, and third-party endorsement patterns.
+\end{itemize}
+
+Each operation involves two actors: the \textbf{client} initiating the
+transaction and the \textbf{employee} processing it at the teller window.
+Anomalies can originate from either side --- a client structuring deposits
+to avoid reporting thresholds, or an employee processing an unusual volume
+of high-value transactions for a concentrated set of clients. This
+dual-actor nature motivates the independent client and employee profiling
+described in Chapter~\ref{ch:architecture}.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Regulatory Framework}
+\label{sec:regulatory}
+% ═══════════════════════════════════════════════════════════
+
+Tunisian banks operate under a layered anti-money laundering (LAB ---
+\textit{Lutte Anti-Blanchiment}) and counter-terrorism financing (FT ---
+\textit{Financement du Terrorisme}) framework involving three
+institutional actors.
+
+\subsection{Banque Centrale de Tunisie (BCT)}
+
+The BCT issues binding circulars that define internal control obligations
+for financial institutions. Circulars 2018-09, 2017-08, and 2021-05
+govern LAB/FT internal controls, including the obligation to report
+transactions exceeding 10,000~DT to the financial intelligence unit.
+These circulars are restricted documents not publicly available; the
+system's regulatory rules are therefore calibrated from the thresholds
+extractable from CTAF case studies and published legislation rather than
+a complete BCT circular inventory. This gap is documented explicitly
+rather than papered over.
+
+\subsection{Commission Tunisienne des Analyses Financières (CTAF)}
+
+The CTAF is Tunisia's financial intelligence unit, responsible for
+receiving and analyzing suspicious transaction reports from financial
+institutions. Its 2021 annual report provides the behavioral ground truth
+for what suspicious operations look like in the Tunisian context: espèces
+are involved in 68\% of flagged cases, virements in 56\%, and chèques in
+34\%. The concentration of reported amounts around the 10,000~DT
+threshold --- with 85\% of flagged operations falling in the
+5,000--20,000~DT band --- directly informed the near-threshold detection
+logic in the system's decision service.
+
+\subsection{Law n°41-2024}
+
+Effective February 2025, this law caps individual cheques at 30,000~DT.
+BCT data from Q1~2026 confirms a 24.9\% collapse in cheque usage volume
+following the law's implementation. This regulatory change required
+adjusting the cheque deposit archetype parameters and introduced a new
+anomaly scenario: cheque amounts clustering just below the 30,000~DT
+ceiling, analogous to the structuring pattern observed below the 10,000~DT
+reporting threshold.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Existing Detection Capabilities}
+\label{sec:existing-aml}
+% ═══════════════════════════════════════════════════════════
+
+The Amen Bank 2023 annual report confirms that the bank already operates
+an AI-based anti-money laundering system. Based on the report's
+description, this system performs \textit{bank-wide compliance reporting on
+transaction streams}: it serves a compliance officer audience, operates at
+a quarterly reporting tempo, and produces output aligned with
+CTAF regulatory requirements.
+
+The system developed in this internship occupies a different position in
+the same regulatory umbrella. It performs \textit{real-time decision
+support for branch supervisors on teller operations}: it monitors four
+specific caisse operations, profiles both the client and the employee as
+independent actors, operates at near-real-time latency, and uses
+sequence-aware LSTM modeling to detect behavioral drift over time. The
+two systems are complementary rather than competing --- the existing
+system answers ``should the bank file a regulatory report?'' while this
+project answers ``should the branch supervisor investigate this
+transaction now?''
+
+
+% ═══════════════════════════════════════════════════════════
+\section{State of the Art}
+\label{sec:state-of-art}
+% ═══════════════════════════════════════════════════════════
+
+This section reviews the techniques that inform the system's design,
+organized from traditional approaches to deep learning methods and
+explainability.
+
+\subsection{Rule-Based Detection}
+
+The earliest and still most widely deployed approach to transaction
+monitoring relies on deterministic rules: fixed thresholds, velocity
+checks, and pattern matching defined by compliance officers. Bolton and
+Hand~\cite{bolton2002} provide a comprehensive survey of statistical
+fraud detection methods, noting that rule-based systems dominate
+production deployments due to their interpretability and auditability.
+
+Rule-based systems have two structural limitations. First, they require
+manual maintenance --- every new fraud typology demands a new rule, and
+threshold calibration is labor-intensive. Second, they cannot detect
+novel patterns that fall outside the predefined rule set. Despite these
+limitations, regulatory requirements often mandate deterministic checks
+(such as the 10,000~DT reporting threshold) that cannot be delegated to
+a probabilistic model. The system developed in this project retains
+deterministic rules in the Decision Service while delegating pattern
+detection to the deep learning models --- combining the auditability
+of rules with the adaptability of learned representations.
+
+\subsection{Statistical Anomaly Detection}
+
+Statistical methods model the distribution of normal behavior and flag
+observations that deviate significantly. Two methods are commonly used
+as baselines in the anomaly detection literature:
+
+\textbf{Isolation Forest}~\cite{liu2008} constructs an ensemble of
+random trees that partition the feature space. Anomalies, being few and
+different, require fewer partitions to isolate and thus have shorter
+average path lengths. The method is efficient on high-dimensional data
+and does not require distributional assumptions, but it treats each
+observation independently --- it cannot model temporal dependencies
+between successive transactions.
+
+\textbf{Local Outlier Factor} (LOF)~\cite{breunig2000} computes the
+local density of each observation relative to its neighbors. Points in
+low-density regions relative to their neighborhood are flagged as
+outliers. LOF is effective for detecting local anomalies in
+heterogeneous datasets but shares the same limitation as Isolation
+Forest: it operates on individual data points without temporal context.
+
+Both methods serve as useful baselines but are fundamentally
+point-wise detectors. Detecting behavioral drift --- a client whose
+transaction pattern gradually shifts over weeks --- requires models
+that consume sequences rather than individual events.
+
+\subsection{Autoencoders for Anomaly Detection}
+
+An Autoencoder is a neural network trained to reconstruct its input
+through a compressed latent representation. When trained exclusively
+on normal data, the network learns to encode and decode the patterns
+present in legitimate transactions. Anomalous inputs, which differ
+from the training distribution, produce high reconstruction errors
+that serve as anomaly scores.
+
+Sakurada and Yairi~\cite{sakurada2014} demonstrated that Autoencoders
+outperform linear PCA-based methods for anomaly detection in
+multivariate time series, particularly when the normal data occupies a
+nonlinear manifold. An and Cho~\cite{an2015} formalized the use of
+reconstruction error as an anomaly score and showed that variational
+Autoencoders provide calibrated uncertainty estimates alongside the
+score.
+
+In the financial domain, Autoencoders are well-suited to the class
+imbalance problem: anomalies represent less than 1\% of transactions,
+making supervised classification impractical without extensive labeled
+data. By training only on normal transactions, the Autoencoder avoids
+the need for labeled anomalies entirely --- a critical advantage in
+banking environments where confirmed fraud labels are scarce and
+often delayed by months.
+
+The system uses an Autoencoder as the \textit{point anomaly detector}:
+each transaction is scored independently based on how well it can be
+reconstructed from the learned normal manifold.
+
+\subsection{LSTM Networks for Sequential Anomaly Detection}
+
+Long Short-Term Memory (LSTM) networks, introduced by Hochreiter and
+Schmidhuber~\cite{hochreiter1997}, address the vanishing gradient
+problem that prevents standard recurrent networks from learning
+long-range dependencies. The LSTM cell's gating mechanism (input,
+forget, and output gates) allows the network to selectively retain
+or discard information across arbitrarily long sequences.
+
+For anomaly detection, the LSTM is trained as a \textit{next-step
+predictor}: given a sequence of recent transactions, it predicts the
+features of the next transaction. The deviation between the predicted
+and observed features serves as the anomaly score. Bontemps et
+al.~\cite{bontemps2016} applied this approach to network intrusion
+detection, showing that LSTM-based prediction models detect subtle
+sequential anomalies that point-wise methods miss.
+
+In the banking context, the LSTM captures behavioral patterns that
+unfold over time: a client who normally transacts once per month but
+suddenly executes five transactions in three days, or a gradual
+increase in transfer amounts to a new beneficiary over several weeks.
+These sequential patterns are invisible to the Autoencoder, which
+evaluates each transaction in isolation.
+
+The system uses the LSTM as the \textit{sequential anomaly detector}:
+it consumes a sliding window of recent transactions per client and
+flags deviations from the predicted behavioral trajectory.
+
+\subsection{Score Fusion}
+
+When multiple anomaly detectors operate in parallel, their scores must
+be combined into a single decision. Aggarwal~\cite{aggarwal2017}
+surveys fusion strategies ranging from simple averaging to learned
+combination functions. The key challenge is that different detectors
+may have different score distributions, making naive averaging
+misleading.
+
+The system uses a sigmoid-weighted fusion mechanism that adapts to
+account maturity. New accounts with limited transaction history favor
+the Autoencoder (which needs only a single event) over the LSTM
+(which needs a populated sequence buffer). As the account matures
+and the sequence buffer fills, the LSTM's weight increases. This
+addresses the cold-start problem inherent in sequential models without
+requiring a separate cold-start detection pathway.
+
+\subsection{Explainability with SHAP}
+
+Deploying a deep learning model in a regulated environment requires
+that every alert be accompanied by an explanation that a non-technical
+supervisor can understand and act upon. Lundberg and
+Lee introduced SHAP (SHapley Additive
+exPlanations), which attributes a model's prediction to individual
+input features using game-theoretic Shapley values. SHAP provides
+three properties that make it suitable for this context: local
+accuracy (the attributions sum to the model output), missingness
+(features not present contribute zero), and consistency (increasing a
+feature's contribution never decreases its attributed importance).
+
+For the Autoencoder, the system uses KernelSHAP --- a model-agnostic
+approximation that treats the reconstruction error function as a black
+box. DeepSHAP is inapplicable because the anomaly score subtracts the
+input from the reconstruction, breaking the standard forward-pass
+tracing that DeepSHAP requires. For the LSTM, SHAP values over the
+full sequence-length-by-feature-count tensor produce attributions too
+granular for a supervisor to interpret. The system instead uses an
+expected-versus-actual comparison: for each interpretable feature, it
+reports the LSTM's predicted value alongside the observed value,
+making deviations immediately legible.
+
+\subsection{Streaming Architectures for Real-Time Detection}
+
+Detecting anomalies in real time requires an architecture that
+processes events as they arrive rather than in periodic batches.
+Kreps et al.~\cite{kreps2011} introduced the log-based streaming
+paradigm with Apache Kafka, where events are written to an
+append-only log partitioned by key and consumed by independent
+services at their own pace. This decouples producers from consumers
+and enables horizontal scaling of individual processing stages.
+
+The system adopts this paradigm using RedPanda, a Kafka-compatible
+broker that eliminates the JVM and ZooKeeper dependencies of Apache
+Kafka while maintaining API compatibility. Four topics form a
+processing chain: raw events are enriched with behavioral features,
+scored by the ML models, evaluated by the decision service, and
+written to a persistent store for dashboard consumption. Partitioning
+by client identifier ensures that all transactions for a given client
+are processed in order --- a requirement for the LSTM's sequential
+modeling.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Problem Statement and Project Objectives}
+\label{sec:problem-statement}
+% ═══════════════════════════════════════════════════════════
+
+The detection of anomalous teller operations at Amen Bank currently
+relies on manual rules and periodic compliance reviews. This approach
+cannot scale to the transaction volume of 150 branches, cannot adapt to
+evolving fraud typologies without manual rule updates, and provides no
+real-time decision support to branch supervisors.
+
+The objective of this internship is to design and implement a
+\textbf{real-time anomaly detection platform} that:
+
+\begin{enumerate}
+    \item Ingests teller transactions as they occur and processes them
+          through a streaming pipeline with near-real-time latency.
+    \item Profiles both the client and the employee as independent
+          behavioral actors, detecting anomalies originating from
+          either side.
+    \item Combines a point anomaly detector (Autoencoder) with a
+          sequential anomaly detector (LSTM) to capture both individual
+          transaction deviations and behavioral drift over time.
+    \item Accompanies every alert with a human-readable explanation
+          generated by SHAP, enabling supervisors to make informed
+          decisions without machine learning expertise.
+    \item Provides a supervisor dashboard for alert review, operational
+          monitoring, and transaction simulation.
+    \item Implements the MLOps infrastructure --- experiment tracking,
+          automated retraining, drift detection, and observability ---
+          required to maintain the system beyond initial deployment.
+\end{enumerate}

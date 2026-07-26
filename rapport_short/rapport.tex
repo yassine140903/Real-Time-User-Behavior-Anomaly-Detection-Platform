@@ -1,0 +1,187 @@
+\documentclass[11pt,a4paper,oneside]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage[left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{setspace}
+
+% --- compact spacing to hold the 40-page budget ---
+\setlength{\parskip}{0.35em}
+\setlength{\emergencystretch}{2.2em}
+\setlist{nosep,leftmargin=1.4em}
+\titlespacing*{\chapter}{0pt}{-20pt}{18pt}
+\titleformat{\chapter}[hang]{\Large\bfseries}{\thechapter\quad}{0pt}{\Large\bfseries}
+\titlespacing*{\section}{0pt}{1.2ex}{0.6ex}
+\titlespacing*{\subsection}{0pt}{1.0ex}{0.4ex}
+\renewcommand{\arraystretch}{1.08}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\begin{document}
+
+% ==================== TITLE PAGE ====================
+\begin{titlepage}
+    \begin{center}
+        
+        % --- Top logos row ---
+        \begin{minipage}{0.3\textwidth}
+            \centering
+            \includegraphics[height=2cm]{logos/fst_logo.png}
+        \end{minipage}
+        \hfill
+        \begin{minipage}{0.3\textwidth}
+            \centering
+            \includegraphics[height=2cm]{logos/manar_logo.png}
+        \end{minipage}
+        
+        \vspace{0.2cm}
+        \rule{\textwidth}{1pt}
+        
+        \vspace{0.5cm}
+        
+        % --- Department and report type ---
+        {\large \textbf{Computer Science Department}}\\[0.2cm]
+        {\Large \textbf{Summer Internship Report}}\\[0.2cm]
+        {\large Second Year in Software Engineering}\\[0.5cm]
+        
+        % --- Author ---
+        {\large Presented by: \textbf{Yassine Ben Jemaa}}\\[0.8cm]
+        
+        % --- Title ---
+        \rule{0.8\textwidth}{0.5pt}\\[0.3cm]
+        {\LARGE \textbf{Design and Implementation of a\\[0.2cm]
+        Real-Time Anomaly Detection Platform\\[0.2cm]
+        for Branch Teller Operations\\[0.2cm]
+        using Deep Learning}}\\[0.3cm]
+        \rule{0.8\textwidth}{0.5pt}\\[0.8cm]
+        
+        % --- Supervisor ---
+        {\large Supervisor: \textbf{Mr. Oussama Ben Cheikh}}\\[0.5cm]
+        
+        % --- Company ---
+        {\large Realized within:}\\[0.3cm]
+        \includegraphics[height=2cm]{logos/amen_logo.jpeg}\\[0.8cm]
+        
+        % --- Academic year ---
+        {\large \textbf{Academic Year: 2025--2026}}
+        
+        \vfill
+        
+        % --- Bottom bar ---
+        \rule{\textwidth}{1pt}\\[0.2cm]
+        \begin{minipage}{0.45\textwidth}
+            \small
+            Faculté des Sciences de Tunis\\
+            Université de Tunis El Manar\\
+            2092 El Manar, Tunis
+        \end{minipage}
+        \hfill
+        \begin{minipage}{0.45\textwidth}
+            \raggedleft\small
+            \url{www.fst.rnu.tn}
+        \end{minipage}
+        
+    \end{center}
+\end{titlepage}
+
+% ==================== FRONT MATTER ====================
+\pagenumbering{roman}
+
+\chapter*{Acknowledgements}
+\addcontentsline{toc}{chapter}{Acknowledgements}
+
+I would like to express my sincere gratitude to Amen Bank for offering me the opportunity to complete this internship within the Direction Centrale du Syst\`eme d'Information. I would especially like to thank my supervisor, Mr. Oussama Ben Cheikh, for his guidance and for granting me the freedom to explore beyond the original project scope.
+
+This experience allowed me to acquire practical skills in deep learning, streaming architectures, and MLOps, and to discover the challenges of building production-oriented systems in a real banking environment.
+
+I would also like to thank the Facult\'e des Sciences de Tunis and the University of Tunis El Manar for the academic foundation that made this work possible.
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+\chapter*{List of Abbreviations}
+\addcontentsline{toc}{chapter}{List of Abbreviations}
+\begin{tabbing}
+\hspace{2.8cm}\= \kill
+\textbf{AE} \> Autoencoder \\
+\textbf{AML} \> Anti-Money Laundering \\
+\textbf{AUC} \> Area Under the Curve \\
+\textbf{BCT} \> Banque Centrale de Tunisie \\
+\textbf{CTAF} \> Commission Tunisienne des Analyses Financi\`eres \\
+\textbf{DI} \> Dependency Injection \\
+\textbf{DLQ} \> Dead Letter Queue \\
+\textbf{DT} \> Dinar Tunisien \\
+\textbf{E2E} \> End-to-End \\
+\textbf{FK} \> Foreign Key \\
+\textbf{FT} \> Financing of Terrorism \\
+\textbf{KPI} \> Key Performance Indicator \\
+\textbf{LAB} \> Lutte Anti-Blanchiment \\
+\textbf{LSTM} \> Long Short-Term Memory \\
+\textbf{MLOps} \> Machine Learning Operations \\
+\textbf{NLG} \> Natural Language Generation \\
+\textbf{ROC} \> Receiver Operating Characteristic \\
+\textbf{SHAP} \> SHapley Additive exPlanations \\
+\end{tabbing}
+
+% ==================== BODY ====================
+\clearpage
+\pagenumbering{arabic}
+
+\input{chapters/intro}
+\input{chapters/ch1_context}
+\input{chapters/ch2_architecture}
+\input{chapters/ch3_synthetic}
+\input{chapters/ch4_training}
+\input{chapters/ch5_streaming}
+\input{chapters/ch6_mlops}
+\input{chapters/ch7_dashboard}
+\input{chapters/ch8_roadmap}
+\input{chapters/conclusion}
+
+% ==================== BIBLIOGRAPHY ====================
+\begin{thebibliography}{10}
+\addcontentsline{toc}{chapter}{Bibliography}
+
+\bibitem{bolton} R. J. Bolton and D. J. Hand, ``Statistical Fraud Detection: A Review,'' \emph{Statistical Science}, vol. 17, no. 3, pp. 235--255, 2002.
+
+\bibitem{iforest} F. T. Liu, K. M. Ting, and Z.-H. Zhou, ``Isolation Forest,'' in \emph{Proc. IEEE Int. Conf. Data Mining (ICDM)}, pp. 413--422, 2008.
+
+\bibitem{lof} M. M. Breunig, H.-P. Kriegel, R. T. Ng, and J. Sander, ``LOF: Identifying Density-Based Local Outliers,'' in \emph{Proc. ACM SIGMOD}, pp. 93--104, 2000.
+
+\bibitem{sakurada} M. Sakurada and T. Yairi, ``Anomaly Detection Using Autoencoders with Nonlinear Dimensionality Reduction,'' in \emph{Proc. MLSDA Workshop}, pp. 4--11, 2014.
+
+\bibitem{ancho} J. An and S. Cho, ``Variational Autoencoder based Anomaly Detection using Reconstruction Probability,'' SNU Data Mining Center, Special Lecture on IE, 2015.
+
+\bibitem{lstm} S. Hochreiter and J. Schmidhuber, ``Long Short-Term Memory,'' \emph{Neural Computation}, vol. 9, no. 8, pp. 1735--1780, 1997.
+
+\bibitem{bontemps} L. Bontemps, J. McDermott, and N.-A. Le-Khac, ``Collective Anomaly Detection based on Long Short-Term Memory Recurrent Neural Networks,'' in \emph{Proc. ICDF2C}, pp. 141--152, 2016.
+
+\bibitem{aggarwal} C. C. Aggarwal, \emph{Outlier Analysis}, 2nd ed. Springer, 2017.
+
+\bibitem{shap} S. M. Lundberg and S.-I. Lee, ``A Unified Approach to Interpreting Model Predictions,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, pp. 4765--4774, 2017.
+
+\bibitem{kafka} J. Kreps, N. Narkhede, and J. Rao, ``Kafka: A Distributed Messaging System for Log Processing,'' in \emph{Proc. NetDB Workshop}, 2011.
+
+\end{thebibliography}
+
+% ==================== APPENDIX ====================
+\appendix
+\input{chapters/appendixA}
+\chapter{Docker Compose Service Inventory}
+\input{chapters/appendix_b}
+
+
+\end{document}

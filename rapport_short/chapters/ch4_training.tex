@@ -1,0 +1,132 @@
+\chapter{Model Training and Evaluation}
+\label{ch:training}
+
+This chapter covers data preparation, the two model architectures, the diagnostic process that identified a fundamental feature engineering flaw, and the final performance after the pipeline rebuild.
+
+\section{Data Preparation}
+
+A \textbf{chronological} split preserves the temporal ordering the LSTM relies on; a random split would leak future events into training and inflate validation metrics.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Data split strategy}
+\begin{tabular}{@{}llrr@{}}
+\toprule
+\textbf{Split} & \textbf{Day range} & \textbf{Events} & \textbf{Anomalies} \\
+\midrule
+Warm-up (discarded) & 1--21 & $\sim$28{,}000 & --- \\
+Train (normal only) & 22--126 & 142{,}254 & 0 \\
+Validation & 127--153 & 36{,}548 & 312 \\
+Test & 154--180 & 36{,}059 & 175 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The first 21 days are discarded as a warm-up period during which client buffers are still populating and velocity features are unreliable. The Autoencoder training set contains \textbf{normal events only} --- the standard approach for reconstruction-based detection: the model learns what normal looks like, and any event it cannot reconstruct well is flagged. A \code{StandardScaler} is fitted on the normal training data only, applied to all splits, and saved alongside the model for inference.
+
+With an anomaly rate of 0.623\%, accuracy is meaningless (predicting ``normal'' always yields 99.4\%). AUC-ROC was chosen as the primary metric because it evaluates performance across all thresholds independently of class distribution, and serves as the Optuna objective function.
+
+\section{Autoencoder}
+
+The Autoencoder is a symmetric feedforward network:
+\[
+30 \xrightarrow{\text{encoder}} 20 \longrightarrow 10 \xrightarrow{\text{decoder}} 20 \longrightarrow 30
+\]
+
+A bottleneck of 10 (one-third of input) provides enough capacity to represent the structure of normal behavior without allowing the network to learn an identity function. ReLU activations, Adam optimizer (learning rate $10^{-3}$), batch size 256, 50 epochs, best model selected by validation AUC.
+
+The anomaly score is the mean squared reconstruction error between input $x$ and reconstruction $\hat{x}$:
+\[
+s_{\text{ae}} = \frac{1}{d}\sum_{i=1}^{d}(x_i - \hat{x}_i)^2
+\]
+
+\section{LSTM}
+
+The LSTM takes the last 10 enriched events and predicts the next:
+\[
+\text{LSTM}(\text{input} = 30,\ \text{hidden} = 64,\ \text{layers} = 2) \rightarrow \text{Linear}(64, 30)
+\]
+
+Two stacked layers process the sequence and the final hidden state feeds a linear projection predicting the 30 features of the next event. The sequence length of 10 balances behavioral context against inference latency. The anomaly score is the mean squared prediction error between predicted $\hat{y}$ and observed $y$:
+\[
+s_{\text{lstm}} = \frac{1}{d}\sum_{i=1}^{d}(y_i - \hat{y}_i)^2
+\]
+
+Sequences are constructed per client with a sliding window: for each event at position $t$, the input is events $[t-10, \dots, t-1]$ and the target is event $t$. Clients with fewer than 11 events are excluded from LSTM training. In the streaming pipeline the sequence buffer lives in Redis and is updated after each event.
+
+\section{Initial Training Failure and Root Cause Analysis}
+
+The initial attempt used the 74-feature schema. Three Autoencoder configurations were evaluated via Optuna; the best achieved AUC 0.577. The LSTM with multi-task prediction heads achieved 0.564. Both were near random, triggering a root cause investigation that identified two independent causes:
+
+\begin{enumerate}
+  \item \textbf{Undetectable scenarios.} Several of the original 13 scenarios had stub implementations producing no measurable change in feature space. \code{timing\_anomaly}, for instance, shifted the event hour, but the enriched event contained no per-event hour feature --- only a profile-level hour distribution that absorbs single-event changes.
+  \item \textbf{Profile dominance.} The 74-feature event was dominated by raw profile dumps identical across every event from the same client within the same week. Anomalous events looked nearly identical to normal events from the same client because both carried the same profile values.
+\end{enumerate}
+
+Three components were redesigned simultaneously: the generator (13 scenarios reduced to 9, each validated for detectability), the enrichment layer (profile dumps replaced by 30 contrast features), and the training data (oracle profile shortcut, removing weekly granularity artifacts).
+
+This was the single most impactful change in the project, and the improvement was entirely \emph{structural}: the same architectures and hyperparameters that produced AUC 0.57 on the 74-feature schema produced AUC 0.98+ on the 30-feature contrast schema.
+
+\section{Post-Rebuild Results}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Model performance comparison}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Model} & \textbf{Initial (74 feat.)} & \textbf{Rebuilt (30 feat.)} & \textbf{Final (aligned)} \\
+\midrule
+Autoencoder & 0.577 & 0.9853 & 0.9714 \\
+LSTM & 0.564 & 0.9866 & 0.9355 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \emph{rebuilt} column reflects training on the oracle profile shortcut used during development; the \emph{final} column reflects retraining on the production-aligned schema where streaming and batch call the same \code{\_compute\_features()} function. The drop between them was expected: the Autoencoder's reconstruction error is less sensitive to input source differences, while the LSTM lost more because sequence modeling benefits from richer per-step representations.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Per-scenario detection performance (rebuilt models)}
+\begin{tabular}{@{}llcc@{}}
+\toprule
+\textbf{Scenario} & \textbf{Tier} & \textbf{AE AUC} & \textbf{LSTM AUC} \\
+\midrule
+Amount spike & Easy & 0.9998 & 0.9999 \\
+Round amount & Easy & 1.0000 & 1.0000 \\
+Duplicate virement & Easy & 0.9980 & --- \\
+Frequency burst & Medium & 0.9983 & 0.9125 \\
+Cumulative threshold & Medium & 0.9742 & 0.8540 \\
+Timing anomaly & Medium & 0.9710 & --- \\
+Smurfing & Hard & 1.0000 & 0.9981 \\
+Cheque structuring & Hard & 1.0000 & 0.9999 \\
+Repeated client-employee & Hard & 0.9983 & 0.9976 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+An unexpected finding: hard-tier scenarios score \emph{higher} than medium-tier ones. The inversion occurs because hard scenarios (smurfing, cheque structuring) modify high-signal features such as \code{z\_amount} and \code{is\_near\_threshold} with large deviations, while medium scenarios produce subtler multi-event patterns requiring more context. The difficulty classification reflects real-world evasion effort, not model sensitivity.
+
+The two models show complementary strengths that justify the dual architecture. The Autoencoder excels at point anomalies visible in a single event and produces high scores from the very first one. The LSTM excels at sequential patterns; its weaker medium-tier performance reflects that those patterns span multiple events and demand sufficient context.
+
+\section{Multi-Mechanism Convergence: Smurfing as Case Study}
+
+Smurfing illustrates how the three detection mechanisms converge on one pattern. The scenario spans 21 days, yet neither the Autoencoder (one event at a time) nor the LSTM (a 10-event window) needs to observe the whole window.
+
+Each smurfing event arrives already enriched with velocity features computed from the rolling Redis buffer: \code{near\_threshold\_count\_7d} accumulates across the window, \code{cumulative\_amount\_24h} reflects recent activity, and \code{z\_amount} captures the deviation from baseline. These features carry behavioral history \emph{into} each event's vector, regardless of the model's own window size. The three mechanisms then contribute distinct signals:
+
+\begin{enumerate}
+  \item \textbf{Autoencoder} --- each event is anomalous in isolation: a salaried client averaging 300~DT suddenly making 8{,}500~DT versements produces high reconstruction error from \code{z\_amount}, \code{amount\_to\_mean\_ratio}, and \code{is\_near\_threshold} alone.
+  \item \textbf{LSTM} --- the 10-event sequence shows escalating velocity features that deviate from the predicted trajectory; the model detects the acceleration within its own context without seeing the full 21 days.
+  \item \textbf{Decision rule 2} --- fires deterministically when the amount falls in the 8{,}000--9{,}999~DT band with $\geq$2 near-threshold transactions in 7 days, requiring no ML inference at all.
+\end{enumerate}
+
+This convergence is a direct consequence of the contrast feature design: because each enriched event carries both its own signal and accumulated behavioral context, even a stateless model participates in detecting a multi-day pattern. The LSTM adds temporal sensitivity; the regulatory rules provide a deterministic safety net.
+
+\section{Framing for Production Deployment}
+
+These AUC values validate the system's ability to learn behavioral patterns and serve predictions end-to-end. They are \emph{not} a production performance benchmark: the models were trained on synthetic data whose statistical properties approximate but do not replicate real Amen Bank distributions.
+
+The engineering argument matters more than the absolute numbers. The system is designed so that replacing synthetic data with real transactions requires only re-running the training pipeline --- the same feature function, the same fusion mechanism, the same decision rules, and the same retraining infrastructure handle real data without code changes. \textbf{The pipeline is the deliverable, not the model weights.}

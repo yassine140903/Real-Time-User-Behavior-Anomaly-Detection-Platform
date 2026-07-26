@@ -1,0 +1,879 @@
+This chapter describes the runtime streaming pipeline: how events flow from
+ingestion through enrichment, scoring, and decision in near real time. It covers
+the messaging topology, the software pattern that enables code reuse across
+streaming, batch, and API paths, the fault tolerance layer, and the integration
+points with PostgreSQL and the nightly batch rebuild.
+
+% ═══════════════════════════════════════════════════════════
+\section{Streaming Topology}
+% ═══════════════════════════════════════════════════════════
+
+The pipeline is organized as a linear chain of four RedPanda topics, each
+consumed by a dedicated microservice that produces to the next:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm,
+    topic/.style={draw, rounded corners, fill=blue!10, minimum width=3cm,
+                  minimum height=0.7cm, font=\small\ttfamily, align=center},
+    service/.style={draw, fill=orange!15, minimum width=3cm,
+                    minimum height=0.7cm, font=\small, align=center},
+    arrow/.style={-{Stealth}, thick}
+]
+\node[topic]   (raw)      {raw-events};
+\node[service, below=of raw]      (enr)      {Enrichment};
+\node[topic,   below=of enr]      (enriched) {enriched-events};
+\node[service, below=of enriched] (scr)      {Scoring};
+\node[topic,   below=of scr]      (scored)   {scored-events};
+\node[service, below=of scored]   (dec)      {Decision};
+\node[topic,   below=of dec]      (decisions){decisions};
+
+\draw[arrow] (raw)      -- (enr);
+\draw[arrow] (enr)      -- (enriched);
+\draw[arrow] (enriched) -- (scr);
+\draw[arrow] (scr)      -- (scored);
+\draw[arrow] (scored)   -- (dec);
+\draw[arrow] (dec)      -- (decisions);
+\end{tikzpicture}
+\caption{Streaming topic chain}
+\label{fig:topic-chain}
+\end{figure}
+
+All four topics share a single partition key: \texttt{client\_id}. This is a
+deliberate constraint. The LSTM model treats each client's transaction history
+as a temporal sequence across all four operation types. If operations were split
+across separate topics (one per operation type), cross-operation ordering would
+be lost --- a retrait followed by a versement five minutes later would arrive on
+different topics with no guaranteed relative ordering. A single topic partitioned
+by \texttt{client\_id} guarantees that all events for a given client arrive at
+the Enrichment Service in the order they occurred, preserving the temporal
+signal the LSTM depends on.
+
+\subsection{Broker Choice: RedPanda}
+
+RedPanda provides a Kafka-compatible API without the JVM or ZooKeeper
+dependency. This matters in a Docker Compose deployment where every service
+competes for memory. A Kafka cluster requires a minimum of three containers
+(ZooKeeper + broker + schema registry), while RedPanda runs as a single
+container with the same producer/consumer API. The streaming wrappers use
+\texttt{kafka-python} and are unaware they are communicating with RedPanda
+rather than Kafka --- the switch is transparent at the application level.
+
+\subsection{Consumer Groups and Offset Management}
+
+Each service registers a dedicated consumer group
+(\texttt{enrichment-service}, \texttt{scoring-service},
+\texttt{decision-service}). Consumer groups provide two guarantees that the
+pipeline relies on. First, offset tracking: if a service restarts, it resumes
+from the last committed offset rather than replaying the entire topic. Second,
+horizontal scalability: adding a second instance of the Enrichment Service
+automatically splits partitions across the two consumers, doubling throughput
+without code changes. In the current deployment, each service runs as a single
+consumer, but the architecture supports scaling out by adding replicas.
+
+% ═══════════════════════════════════════════════════════════
+\section{Core Extraction Pattern}
+% ═══════════════════════════════════════════════════════════
+
+The system supports three execution paths that all require the same computation:
+
+\begin{enumerate}
+    \item \textbf{Streaming} --- Kafka consumer loop, one event at a time,
+          writes to Redis buffers
+    \item \textbf{Batch} --- Airflow DAG iterating over PostgreSQL rows,
+          no Redis interaction
+    \item \textbf{Simulation API} --- FastAPI endpoint, synchronous
+          request-response, read-only Redis access
+\end{enumerate}
+
+Duplicating the enrichment, scoring, or decision logic across these three paths
+would create a maintenance burden and a drift risk: any feature computation
+change would need to be applied in three places. The solution is a consistent
+separation between \emph{core logic} and \emph{transport wrappers}.
+
+\subsection{Core Modules}
+
+Each pipeline stage has a core module that encapsulates all domain logic:
+
+\begin{table}[H]
+\centering
+\caption{Core modules and their responsibilities}
+\label{tab:core-modules}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Core} & \textbf{File} & \textbf{Public Method} \\
+\midrule
+EnrichmentCore & \texttt{src/enrichment/core.py} & \texttt{enrich\_event()} \\
+ScoringCore    & \texttt{src/scoring/core.py}     & \texttt{score\_event()} \\
+DecisionCore   & \texttt{src/decision/core.py}    & \texttt{decide\_event()} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each core receives its dependencies via constructor injection: a Redis client,
+model objects, or configuration. The core exposes a single public method
+(fa\c{c}ade pattern) and uses private helpers for sub-steps. Critically, the
+cores have no knowledge of Kafka, Airflow, or FastAPI --- they operate on
+Python dictionaries and return Python dictionaries.
+
+\subsection{Thin Streaming Wrappers}
+
+The Kafka-specific logic lives in \texttt{src/streaming/}, where each wrapper
+file does exactly three things: poll a topic, call the core's public method,
+and produce the result to the next topic. The wrapper receives its core
+instance via dependency injection at startup. The \texttt{\_\_main\_\_} block
+is the sole wiring point: it creates the Redis client, loads models, constructs
+the core, injects it into the wrapper, and starts the poll loop.
+
+This separation has a concrete payoff. When the batch pipeline was rewritten
+(Section~\ref{sec:batch-integration}), it imported \texttt{EnrichmentCore}
+and called the same \texttt{\_compute\_features()} method. When the simulation
+API was built, it imported all three cores and wired them with a shared Redis
+client. In both cases, zero feature computation code was duplicated.
+
+% ═══════════════════════════════════════════════════════════
+\section{Dead Letter Queue and Fault Tolerance}
+\label{sec:dlq}
+% ═══════════════════════════════════════════════════════════
+
+In a streaming pipeline, a single malformed event can block an entire consumer
+if the error is not handled. The fault tolerance layer classifies failures into
+two categories and applies different strategies to each.
+
+\subsection{Failure Classification}
+
+\paragraph{Poison pills} (\texttt{KeyError}, \texttt{ValueError},
+\texttt{JSONDecodeError}) are structurally invalid events that will never
+succeed regardless of how many times they are retried. These are routed to
+the DLQ immediately with \texttt{retry\_count=0}.
+
+\paragraph{Transient failures} (\texttt{redis.ConnectionError},
+\texttt{psycopg2.OperationalError}, network timeouts) are infrastructure
+errors that may resolve on their own. The consumer applies exponential
+backoff (1s, 2s, 4s) and retries up to 3 times. If all retries fail, the
+event is routed to the DLQ with \texttt{retry\_count=3}.
+
+The distinction matters because the two classes require opposite responses.
+Retrying a poison pill wastes time and will never succeed. Immediately
+discarding a transient failure loses an event that would have succeeded one
+second later when Redis reconnected.
+
+\subsection{ResilientConsumer}
+
+The \texttt{ResilientConsumer} class (\texttt{src/streaming/dlq.py}) wraps all
+three streaming services. It intercepts exceptions from the core's public
+method, classifies them using an \texttt{isinstance} check against a
+\texttt{TRANSIENT\_ERRORS} tuple, applies the appropriate strategy, and
+produces failed events to a single \texttt{dlq} topic.
+
+Each DLQ message is wrapped in a metadata envelope:
+
+\begin{table}[H]
+\centering
+\caption{DLQ envelope fields}
+\label{tab:dlq-envelope}
+\begin{tabular}{@{}lp{7.5cm}@{}}
+\toprule
+\textbf{Field} & \textbf{Description} \\
+\midrule
+\texttt{original\_event}  & The raw event that caused the failure \\
+\texttt{source\_topic}    & Topic the event was consumed from \\
+\texttt{service}          & Service that failed (enrichment, scoring, decision) \\
+\texttt{error\_type}      & Exception class name \\
+\texttt{error\_message}   & Exception message string \\
+\texttt{stacktrace}       & Full Python traceback \\
+\texttt{retry\_count}     & Number of retries attempted before routing to DLQ \\
+\texttt{max\_retries}     & Configured maximum (3 for transient errors) \\
+\texttt{timestamps}       & First failure and last failure timestamps \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The envelope preserves enough context for an operator to diagnose the failure,
+replay the event after fixing the root cause, and distinguish between
+infrastructure outages (transient, clustered in time) and data quality issues
+(poison pills, scattered across clients).
+
+\subsection{Structured Logging}
+
+The streaming services use structured JSON logging rather than plain
+\texttt{print()} statements. A \texttt{JsonFormatter} class
+(\texttt{src/streaming/logger.py}) formats every log line as a JSON object
+with a fixed schema: \texttt{timestamp} (UTC ISO 8601), \texttt{service},
+\texttt{level}, \texttt{message}, and optional contextual fields
+(\texttt{event\_id}, \texttt{client\_id}, \texttt{error\_type},
+\texttt{retry\_count}, \texttt{score}, \texttt{alert\_tier}).
+
+A \texttt{setup\_logger(service\_name)} factory function creates a named
+logger with the JSON formatter attached. Each streaming service calls
+this factory once at startup. The structured format enables log aggregation
+tools to filter, group, and alert on specific fields without parsing free-text
+messages --- for example, filtering all log lines where
+\texttt{error\_type = "redis.ConnectionError"} to detect infrastructure
+degradation.
+
+% ═══════════════════════════════════════════════════════════
+\section{Enrichment Service}
+% ═══════════════════════════════════════════════════════════
+
+The Enrichment Service consumes raw events, computes 30 contrast features by
+comparing the current event against the client's historical profile, and
+produces enriched events for the Scoring Service.
+
+\subsection{Data Sources}
+
+For each incoming event, the service fetches two categories of data from Redis:
+
+\begin{table}[H]
+\centering
+\caption{Enrichment Service data sources}
+\label{tab:enrichment-sources}
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+\textbf{Source} & \textbf{Redis Key} & \textbf{Content} \\
+\midrule
+Client profile & \texttt{profile:client:\{id\}} & Batch-computed statistics:
+    amount means/stds per operation, operation mix distributions, archetype,
+    account age \\
+Client buffer  & \texttt{buffer:client:\{id\}} & Last 50 raw event summaries
+    (timestamp, amount, operation, payload) for velocity features \\
+Employee buffer & \texttt{buffer:employee:\{id\}} & Recent events processed
+    by this employee for peer comparison features \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The client profile is rebuilt nightly by the batch pipeline
+(Section~\ref{sec:batch-integration}). The buffers are updated per-event by
+the Enrichment Service itself after feature computation.
+
+\subsection{Feature Computation}
+
+The 30 enriched features are organized into categories that reflect how each
+feature is derived:
+
+\begin{table}[H]
+\centering
+\caption{Enriched feature categories}
+\label{tab:enriched-features-ch5}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\textbf{Category} & \textbf{Count} & \textbf{Source} \\
+\midrule
+Raw event (amount, hour, operation one-hot, branch match) & 7 & Event \\
+Amount contrast (z-score, ratio to mean, threshold flags) & 6 & Event + Profile \\
+Operation contrast (deviation from expected mix)          & 1 & Event + Profile \\
+Timing contrast (hour deviation, day-of-month deviation)  & 2 & Event + Profile \\
+Counterparty contrast (known vs. new)                     & 1 & Event payload \\
+Velocity (24h/7d counts, cumulative amount, duplicates)   & 5 & Redis buffer \\
+Employee (transaction count, client pair count)            & 2 & Redis buffer \\
+Context (archetype one-hot, account age)                  & 6 & Profile \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The term \emph{contrast feature} is central to the design. Raw event fields
+(amount, hour, operation type) carry no anomaly signal on their own --- a
+10{,}000~DT versement is normal for a big business client but extreme for a
+student. Every feature is computed relative to the client's own baseline,
+transforming absolute values into deviations that are comparable across
+archetypes.
+
+\subsection{Amount Statistics Fallback Chain}
+
+When a client has no 30-day transaction history for a given operation type
+(common for infrequent operations like cheque deposits), the amount z-score
+computation would fail with a division-by-zero. The service applies a three-level
+fallback chain: 30-day statistics first, then 90-day statistics, then the
+archetype baseline. This ensures every event receives a meaningful contrast
+score regardless of the client's transaction density.
+
+\subsection{Sequence Buffer Management}
+
+After computing the 30 features, the Enrichment Service appends the
+\emph{unscaled} feature vector to \texttt{sequence:client:\{id\}} in Redis,
+capped at 10 entries. The Scoring Service later retrieves this sequence,
+scales it using the training-time \texttt{StandardScaler}, and feeds it to
+the LSTM. The features are stored unscaled because the scaler is owned by
+the Scoring Service --- storing pre-scaled features would create a coupling
+between the Enrichment Service and the scaler version, breaking independence
+during model retraining.
+
+% ═══════════════════════════════════════════════════════════
+\section{Scoring Service}
+% ═══════════════════════════════════════════════════════════
+
+The Scoring Service consumes enriched events, runs both anomaly detection
+models, and produces a fused anomaly score with optional SHAP explanations.
+
+\subsection{Score Fusion}
+
+The system runs two complementary models on every event:
+
+\begin{itemize}
+    \item \textbf{Autoencoder} --- computes a reconstruction error that
+          measures how different the current event is from the ``normal''
+          patterns learned during training. The error is converted to a
+          percentile rank against the training distribution.
+    \item \textbf{LSTM} --- evaluates how surprising the current event is
+          given the client's recent sequence of transactions. The prediction
+          error is similarly converted to a percentile rank.
+\end{itemize}
+
+The two scores are combined using a sigmoid-weighted fusion controlled by
+account maturity:
+
+\[
+w_{\text{lstm}} = \sigma\!\left(\frac{d - 90}{15}\right)
+\]
+
+where $d$ is the number of days since the account was opened, and $\sigma$ is
+the logistic function. For accounts younger than ${\sim}75$ days, the
+Autoencoder dominates ($w_{\text{lstm}} \approx 0$). For mature accounts
+($d > 105$), the LSTM dominates ($w_{\text{lstm}} \approx 1$). The midpoint
+of 90 days reflects the minimum history needed for the LSTM's sequence model
+to produce reliable predictions.
+
+\[
+\text{fused\_score} = (1 - w_{\text{lstm}}) \cdot s_{\text{ae}}
+                    + w_{\text{lstm}} \cdot s_{\text{lstm}}
+\]
+
+\subsection{Cold-Start Guard}
+
+Clients with fewer than 5 events in their sequence buffer present a distinct
+problem. Their velocity features (\texttt{tx\_count\_24h},
+\texttt{cumulative\_amount\_24h}) sit far outside the training distribution,
+which applied a 21-day warm-up filter. Without a guard, these zero-velocity
+vectors produce AE reconstruction errors that map to percentiles above 0.99,
+generating false BLOCK-tier alerts for every new client.
+
+The Scoring Service detects cold-start conditions by checking the sequence
+buffer length in Redis. When the buffer contains fewer than 5 events, it
+returns a neutral score of 0.5 with $w_{\text{lstm}} = 0$ and no SHAP
+explanations. This creates a three-tier progression:
+
+\begin{table}[H]
+\centering
+\caption{Scoring behavior by buffer maturity}
+\label{tab:cold-start-ch5}
+\begin{tabular}{@{}rll@{}}
+\toprule
+\textbf{Buffer Size} & \textbf{Scoring Mode} & \textbf{Rationale} \\
+\midrule
+0--4 events  & Neutral (0.5)    & Insufficient data for meaningful scoring \\
+5--9 events  & AE only          & Enough for point anomaly, not for sequence \\
+10+ events   & Full AE + LSTM   & Both models have sufficient context \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Conditional SHAP}
+
+SHAP explanations are computationally expensive --- KernelExplainer for the
+Autoencoder requires multiple model evaluations per event. To avoid wasting
+computation on events that will be classified as INFO, the Scoring Service
+only generates SHAP explanations when the fused score exceeds the first
+threshold ($T_1 = 0.95$). Events below this threshold are overwhelmingly
+normal; explanations for them would never reach the supervisor's screen.
+
+% ═══════════════════════════════════════════════════════════
+\section{Decision Service}
+% ═══════════════════════════════════════════════════════════
+
+The Decision Service consumes scored events and produces the final alert
+decision: an alert tier (INFO, REVIEW, ALERT, or BLOCK) with an explanation
+combining model scores and regulatory rule triggers.
+
+\subsection{Alert Tier Assignment}
+
+The base tier is derived from the fused anomaly score using three thresholds:
+
+\begin{table}[H]
+\centering
+\caption{Score-to-tier mapping}
+\label{tab:tier-thresholds}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Score Range} & \textbf{Tier} & \textbf{Supervisor Action} \\
+\midrule
+$< 0.95$ (T\textsubscript{1})                          & INFO   & No action required \\
+$\geq 0.95$ and $< 0.99$ (T\textsubscript{2})          & REVIEW & Manual review recommended \\
+$\geq 0.99$ and $< 0.999$ (T\textsubscript{3})         & ALERT  & Immediate review required \\
+$\geq 0.999$                                            & BLOCK  & Transaction held pending review \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Regulatory Rules}
+
+After the score-based tier is assigned, 8 regulatory rules are evaluated. Each
+rule can \emph{escalate} the tier but never \emph{de-escalate} it. This is a
+deliberate design constraint: if the model assigns ALERT and a rule would
+suggest REVIEW, the tier stays at ALERT. Regulatory flags are always logged
+for audit purposes regardless of whether they change the tier.
+
+The escalation-only principle exists because rules encode hard regulatory
+requirements (BCT reporting thresholds, LAB/FT structuring patterns) that
+must never be overridden by a statistical model. A model might assign a low
+score to a transaction that happens to hit a regulatory threshold; the rule
+ensures the supervisor still sees it.
+
+Selected rules illustrate the pattern:
+
+\begin{itemize}
+    \item \textbf{BCT threshold rule} --- any single transaction exceeding
+          10{,}000~DT escalates to at least REVIEW, but only when the amount
+          z-score $\geq 2$. The z-score guard prevents routine big-business
+          transactions (where 10{,}000~DT is normal) from flooding the
+          REVIEW queue.
+    \item \textbf{Smurfing detection} --- multiple versements in the
+          8{,}000--9{,}999~DT band within 48 hours escalates to ALERT,
+          targeting deliberate structuring below the reporting threshold.
+    \item \textbf{Cheque cap rule} --- any cheque exceeding 30{,}000~DT
+          (the cap established by Law n\textsuperscript{o}41-2024, effective
+          February 2025) escalates to BLOCK.
+\end{itemize}
+
+\subsection{Cold-Start Tier Cap}
+
+Events flagged as \texttt{cold\_start=True} by the Scoring Service still pass
+through all regulatory rules --- a genuinely suspicious transaction from a new
+client must still trigger the appropriate flags. However, the Decision Service
+caps the final tier at REVIEW for cold-start events. This prevents the neutral
+score of 0.5 from being escalated to ALERT or BLOCK by rules alone, which would
+generate high-priority alerts for clients who simply have not built enough
+history yet. The cap is logged in the decision reasons so supervisors understand
+why the tier is limited.
+
+% ═══════════════════════════════════════════════════════════
+\section{Sink Consumers}
+\label{sec:sinks}
+% ═══════════════════════════════════════════════════════════
+
+Two sink consumers persist streaming data to PostgreSQL for historical
+querying, dashboard display, and the retraining feedback loop.
+
+\subsection{Raw Events Sink}
+
+The \texttt{raw\_events\_sink} consumes from the \texttt{raw-events} topic
+and inserts each event into the \texttt{transactions} table. This provides the
+permanent record that the batch pipeline uses for nightly profile rebuilds
+and that the dashboard uses for transaction history display.
+
+\subsection{Decisions Sink}
+
+The \texttt{decisions\_sink} consumes from the \texttt{decisions} topic and
+performs two writes per event:
+
+\begin{enumerate}
+    \item \textbf{PostgreSQL} --- inserts into the \texttt{alerts} table with
+          the alert tier, fused score, SHAP explanation (stored as JSONB), and
+          all triggered rule names. The \texttt{supervisor\_decision} and
+          \texttt{decision\_timestamp} fields are initially \texttt{NULL},
+          populated later when the supervisor confirms or rejects the alert
+          through the dashboard.
+    \item \textbf{Redis} --- increments risk history counters for the client
+          (\texttt{risk:client:\{id\}}), tracking the count of alerts per tier
+          over rolling windows. These counters feed back into the enrichment
+          features for subsequent events.
+\end{enumerate}
+
+\subsection{Deliberate FK Omission}
+
+The \texttt{alerts} table does not have a foreign key constraint to the
+\texttt{transactions} table, despite both containing the same
+\texttt{event\_id}. This is intentional. The two sink consumers run in
+parallel: one consumes \texttt{raw-events}, the other consumes
+\texttt{decisions}. Because the decision pipeline adds latency (enrichment,
+scoring, rule evaluation), the decisions sink may attempt to insert an alert
+before the raw events sink has inserted the corresponding transaction. A
+foreign key constraint would cause intermittent insertion failures depending
+on which consumer is faster at any given moment. The \texttt{event\_id} field
+still links the two tables logically; the constraint is enforced at the
+application level rather than the database level.
+
+
+% ═══════════════════════════════════════════════════════════
+\section{Data Persistence Layer}
+\label{sec:persistence}
+% ═══════════════════════════════════════════════════════════
+
+The PostgreSQL database serves as the cold store for the entire system. It
+receives writes from two streaming sinks and the batch pipeline, and provides
+reads for the dashboard, the batch profile rebuild, and the retraining
+pipeline. Figure~\ref{fig:er-diagram} shows the table relationships.
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.2cm and 1.8cm,
+    every node/.style={font=\small},
+    table/.style={
+        draw, rectangle, rounded corners=2pt,
+        inner sep=0pt, outer sep=0pt,
+        minimum width=3.4cm
+    },
+    header/.style={
+        fill=blue!15, font=\small\bfseries\ttfamily,
+        minimum width=3.4cm, minimum height=0.5cm, align=center
+    },
+    cols/.style={
+        fill=white, font=\tiny\ttfamily,
+        minimum width=3.4cm, align=left, inner sep=4pt
+    },
+    fk/.style={-{Stealth}, thick},
+    nofk/.style={-{Stealth}, thick, dashed},
+]
+
+% ── clients_master ──
+\node[table] (clients) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{clients\_master};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{client\_id} : UUID PK\\
+        archetype : VARCHAR\\
+        account\_opening\_date : DATE\\
+        nationality : VARCHAR\\
+        client\_type : VARCHAR\\
+        home\_branch\_id : VARCHAR
+    };
+    \end{tabular}
+};
+
+% ── employees_master ──
+\node[table, right=3cm of clients] (employees) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{employees\_master};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{employee\_id} : VARCHAR PK\\
+        branch\_id : VARCHAR
+    };
+    \end{tabular}
+};
+
+% ── accounts ──
+\node[table, below=of clients] (accounts) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{accounts};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{account\_id} : UUID PK\\
+        client\_id : UUID FK\\
+        opening\_date : DATE\\
+        account\_type : VARCHAR\\
+        status : VARCHAR
+    };
+    \end{tabular}
+};
+
+% ── transactions ──
+\node[table, right=3cm of accounts] (transactions) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{transactions};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{event\_id} : UUID PK\\
+        client\_id : UUID\\
+        account\_id : UUID\\
+        employee\_id : VARCHAR\\
+        branch\_id : VARCHAR\\
+        timestamp : TIMESTAMP\\
+        amount : NUMERIC\\
+        operation\_type : VARCHAR\\
+        payload : JSONB
+    };
+    \end{tabular}
+};
+
+% ── alerts ──
+\node[table, below=of accounts] (alerts) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{alerts};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{alert\_id} : SERIAL PK\\
+        event\_id : UUID\\
+        client\_id : UUID\\
+        tier : alert\_tier ENUM\\
+        fused\_score : FLOAT\\
+        reasons : TEXT[]\\
+        explanation : JSONB\\
+        supervisor\_decision : VARCHAR\\
+        decision\_timestamp : TIMESTAMP
+    };
+    \end{tabular}
+};
+
+% ── evaluation_labels ──
+\node[table, right=3cm of alerts] (eval) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{evaluation\_labels};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{event\_id} : UUID FK\\
+        is\_anomaly : BOOLEAN\\
+        anomaly\_type : VARCHAR
+    };
+    \end{tabular}
+};
+
+% ── profile_snapshots ──
+\node[table, below=1.5cm of alerts] (profiles) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{profile\_snapshots};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{client\_id} : UUID\\
+        \underline{snapshot\_date} : DATE\\
+        profile\_data : JSONB
+    };
+    \end{tabular}
+};
+
+% ── employee_profile_snapshots ──
+\node[table, right=3cm of profiles] (emp_profiles) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{employee\_profiles};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{employee\_id} : VARCHAR\\
+        \underline{snapshot\_date} : DATE\\
+        profile\_data : JSONB
+    };
+    \end{tabular}
+};
+
+% ── archetype_baselines ──
+\node[table, below=1cm of profiles] (baselines) {
+    \begin{tabular}{@{}c@{}}
+    \tikz\node[header]{archetype\_baselines};\\[-0.4pt]
+    \tikz\node[cols]{%
+        \underline{archetype} : VARCHAR PK\\
+        baseline\_data : JSONB
+    };
+    \end{tabular}
+};
+
+% ── Relationships ──
+\draw[fk] (accounts.north) -- node[left, font=\tiny, pos=0.5] {FK} (clients.south);
+\draw[fk] (eval.north) -- node[right, font=\tiny, pos=0.5] {FK} (transactions.south);
+\draw[nofk] (alerts.north east) -- node[left, font=\tiny, pos=0.4] {no FK} (transactions.south west);
+
+\end{tikzpicture}
+}%
+\caption{Database schema --- entity relationship diagram. Solid arrows represent
+         foreign key constraints; the dashed arrow between \texttt{alerts} and
+         \texttt{transactions} indicates a logical link without a database-level
+         constraint (Section~\ref{sec:sinks}).}
+\label{fig:er-diagram}
+\end{figure}
+
+\subsection{Master Tables}
+
+Two master tables store the static reference data loaded once from the
+generator output:
+
+\begin{table}[H]
+\centering
+\caption{\texttt{clients\_master} --- one row per client}
+\label{tab:clients-master}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Column} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{client\_id}           & UUID PK      & Unique client identifier \\
+\texttt{archetype}            & VARCHAR(20)  & One of: salaried, small\_business, student, retiree, big\_business \\
+\texttt{account\_opening\_date} & DATE        & Used to compute \texttt{account\_age\_days} during enrichment \\
+\texttt{nationality}          & VARCHAR(5)   & Default \texttt{TN} (Tunisia) \\
+\texttt{client\_type}         & VARCHAR(30)  & Regulatory classification: personne\_physique or personne\_morale \\
+\texttt{home\_branch\_id}     & VARCHAR(10)  & Primary branch for branch-match feature \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\texttt{employees\_master} --- one row per teller}
+\label{tab:employees-master}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Column} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{employee\_id} & VARCHAR(10) PK & Teller identifier (e.g., \texttt{EMP-0001}) \\
+\texttt{branch\_id}   & VARCHAR(10)    & Assigned branch (exactly 2 employees per branch) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Transaction and Event Tables}
+
+\begin{table}[H]
+\centering
+\caption{\texttt{transactions} --- populated by the raw events sink}
+\label{tab:transactions-table}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Column} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{event\_id}       & UUID PK      & Unique event identifier \\
+\texttt{client\_id}      & UUID         & Client performing the operation \\
+\texttt{account\_id}     & UUID         & Target account \\
+\texttt{employee\_id}    & VARCHAR(10)  & Teller processing the operation \\
+\texttt{branch\_id}      & VARCHAR(10)  & Branch where the operation occurred \\
+\texttt{timestamp}       & TIMESTAMP    & Operation timestamp \\
+\texttt{amount}          & NUMERIC      & Transaction amount in TND \\
+\texttt{currency}        & VARCHAR(3)   & Always \texttt{TND} \\
+\texttt{channel}         & VARCHAR(20)  & Always \texttt{guichet} (teller window) \\
+\texttt{operation\_type} & VARCHAR(20)  & One of: retrait, versement, virement, cheque \\
+\texttt{payload}         & JSONB        & Operation-specific fields (beneficiary, cheque number, etc.) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\texttt{evaluation\_labels} --- ground truth for model evaluation}
+\label{tab:eval-labels}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Column} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{event\_id}     & UUID FK $\rightarrow$ \texttt{transactions} & Links to the original event \\
+\texttt{is\_anomaly}   & BOOLEAN  & Generator oracle label \\
+\texttt{anomaly\_type} & VARCHAR  & Scenario name (e.g., smurfing, amount\_spike) or \texttt{NULL} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The \texttt{evaluation\_labels} table is separated from \texttt{transactions}
+by design. Oracle labels are generator metadata used exclusively for model
+evaluation --- they do not exist in a production system with real data. Keeping
+them in a separate table makes it trivial to exclude them from production
+deployments without modifying the transaction schema.
+
+\subsection{Alerts Table}
+
+\begin{table}[H]
+\centering
+\caption{\texttt{alerts} --- populated by the decisions sink}
+\label{tab:alerts-table}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Column} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{alert\_id}            & SERIAL PK    & Auto-incrementing alert identifier \\
+\texttt{event\_id}            & UUID         & References the triggering event (no FK --- see Section~\ref{sec:sinks}) \\
+\texttt{client\_id}           & UUID         & Client involved \\
+\texttt{employee\_id}         & VARCHAR(10)  & Teller who processed the operation \\
+\texttt{branch\_id}           & VARCHAR(10)  & Branch location \\
+\texttt{timestamp}            & TIMESTAMP    & Event timestamp \\
+\texttt{amount}               & NUMERIC      & Transaction amount \\
+\texttt{operation\_type}      & VARCHAR(20)  & Operation type \\
+\texttt{tier}                 & alert\_tier ENUM & INFO, REVIEW, ALERT, or BLOCK \\
+\texttt{fused\_score}         & FLOAT        & Combined AE + LSTM anomaly score \\
+\texttt{reasons}              & TEXT[]       & Array of triggered rule names and score-based reasons \\
+\texttt{regulatory\_flags}    & TEXT[]       & Regulatory rules that fired (logged regardless of tier impact) \\
+\texttt{explanation}          & JSONB        & SHAP explanation with \texttt{reasons} (NLG text) and \texttt{raw} (feature-level detail) \\
+\texttt{supervisor\_decision} & VARCHAR(10)  & \texttt{pending}, \texttt{confirmed}, or \texttt{rejected} \\
+\texttt{supervisor\_notes}    & TEXT         & Free-text supervisor commentary \\
+\texttt{decision\_timestamp}  & TIMESTAMP    & When the supervisor acted \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The \texttt{tier} column uses a PostgreSQL ENUM type rather than a VARCHAR.
+This enforces valid values at the database level and enables direct ordering
+(\texttt{INFO < REVIEW < ALERT < BLOCK}) in queries without a CASE expression.
+
+\subsection{Profile and Baseline Tables}
+
+Three tables support the batch profile rebuild pipeline:
+
+\begin{table}[H]
+\centering
+\caption{Profile and baseline tables}
+\label{tab:profile-tables}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Table} & \textbf{Key} & \textbf{Content} \\
+\midrule
+\texttt{profile\_snapshots}          & (\texttt{client\_id}, \texttt{snapshot\_date})
+    & Client profile as JSONB: transaction statistics, behavioral distributions,
+      financial state, risk history, recent events buffer \\
+\addlinespace
+\texttt{employee\_profile\_snapshots} & (\texttt{employee\_id}, \texttt{snapshot\_date})
+    & Employee profile as JSONB: processed transaction stats, client distribution,
+      peer comparison z-scores \\
+\addlinespace
+\texttt{archetype\_baselines}        & \texttt{archetype} PK
+    & Per-archetype reference statistics as JSONB: mean amounts, operation mix,
+      frequency norms. Used as the final fallback in the amount statistics
+      fallback chain \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Profiles are stored as JSONB rather than as individual columns. A client
+profile contains approximately 194 fields across 6 categories; normalizing
+these into columns would produce an unwieldy table that changes shape every
+time a feature is added. JSONB stores the profile as a single document,
+and the nightly rebuild overwrites it atomically via \texttt{ON CONFLICT}
+upsert. The tradeoff is that individual fields cannot be indexed or queried
+efficiently, but the access pattern (load entire profile into Redis) does not
+require per-field queries.
+
+% ═══════════════════════════════════════════════════════════
+\section{Batch Integration}
+\label{sec:batch-integration}
+% ═══════════════════════════════════════════════════════════
+
+The streaming pipeline depends on client profiles that are too expensive to
+recompute on every event. A nightly batch pipeline rebuilds these profiles
+from the full transaction history in PostgreSQL and loads the results into
+Redis for the next day's streaming consumption.
+
+\subsection{Nightly Profile Rebuild}
+
+An Airflow DAG (\texttt{nightly\_profiles}) runs eight tasks with validation
+gates between stages:
+
+\begin{enumerate}
+    \item Rebuild client profile snapshots from the \texttt{transactions} table
+    \item Validate snapshot completeness (row counts, null checks)
+    \item Rebuild employee profile snapshots
+    \item Validate employee snapshots
+    \item Recompute archetype baselines
+    \item Validate baselines
+    \item Hydrate Redis with updated profiles
+    \item Run a smoke test (score a sample event with the new profiles)
+\end{enumerate}
+
+Each task uses \texttt{ON CONFLICT} upserts on its target table, making every
+task individually retriable. If an Airflow task fails mid-execution and is
+retried, the upsert ensures that partially-written rows are overwritten
+rather than duplicated.
+
+\subsection{Feature Parity Guarantee}
+
+The batch profile computation calls the same
+\texttt{EnrichmentCore.\_compute\_features()} method used by the streaming
+pipeline. The method is a pure function: it takes an event, a profile, and
+buffer data as arguments and returns 30 features with no side effects. The
+batch script passes the archetype baseline as a parameter rather than
+fetching it from Redis, which is the only difference from the streaming path.
+
+This design guarantees that the features used to rebuild profiles overnight are
+computed with identical logic to the features produced in real time. Any change
+to the feature computation --- adding a feature, modifying a z-score formula,
+adjusting the fallback chain --- is automatically reflected in both paths
+because both paths call the same function.
+
+\subsection{Streaming--Batch Coordination}
+
+The current deployment does not pause streaming consumers during the batch
+rebuild window. In practice, the nightly DAG runs during low-traffic hours
+when transaction volume is minimal, and the Redis hydration step atomically
+overwrites profile keys. A brief window exists where a streaming event could
+read a stale profile (pre-rebuild) and then the next event reads the updated
+profile, creating a one-event inconsistency. For the current deployment this
+is acceptable; a production system would implement a coordination mechanism
+such as pausing consumers during the hydration step or using Redis
+transactions to swap profile versions atomically. This is documented as
+future work in Chapter~\ref{ch:roadmap}.

@@ -1,0 +1,14 @@
+\babel@toc {english}{}\relax 
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {5.1}{\ignorespaces Streaming topic chain}}{37}{figure.caption.17}%
+\contentsline {figure}{\numberline {5.2}{\ignorespaces Database schema --- entity relationship diagram. Solid arrows represent foreign key constraints; the dashed arrow between \texttt {alerts} and \texttt {transactions} indicates a logical link without a database-level constraint (Section~\ref {sec:sinks}).}}{47}{figure.caption.26}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {6.1}{\ignorespaces Drift-triggered retraining chain. The webhook relay exists because AlertManager cannot natively authenticate against Airflow's REST API.}}{59}{figure.caption.33}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
