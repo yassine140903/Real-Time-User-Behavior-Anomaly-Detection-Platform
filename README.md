@@ -96,30 +96,26 @@ Transactions move through a four-stage streaming pipeline built on Kafka-compati
 **Prerequisites:** Docker and Docker Compose.
 
 ```bash
+# 1. Clone the repo
 git clone <repo-url>
 cd Real-Time-User-Behavior-Anomaly-Detection-Platform
 
-# 1. Generate synthetic clients, transactions, and labeled anomalies
-python -m src.generator.main
-
-# 2. Seed PostgreSQL from the generated CSVs
-docker compose --profile seed up db-seed
-
-# 3. Build all images
+# 2. Build all images
 docker compose build
 
-# 4. Bring up the full platform
+# 3. Seed PostgreSQL from the committed CSVs
+docker compose --profile seed up db-seed
+
+# 4. Bring up the full platform (hydrate-redis runs automatically before pipeline services start)
 docker compose up -d
+
+# 5. Run the simulator to stream events through the pipeline
+docker compose --profile simulate run --rm simulator
 ```
 
-For a live demo of the streaming pipeline rather than a full historical backfill, hydrate Redis without pre-loading rolling buffers and start the simulator from a fixed recent date:
+The dashboard is available at `http://localhost:8501`, MLflow at `http://localhost:5001`, Airflow at `http://localhost:8080` (admin/admin), and Prometheus at `http://localhost:9090`.
 
-```bash
-docker compose run --rm hydrate-redis python -m src.batch.hydrate_redis --skip-buffers
-docker compose run --rm simulator python -m src.streaming.simulator --start_date 2025-06-20
-```
-
-This lets the buffers build up organically as events stream through, which is more representative of what a supervisor watching the dashboard would actually see. The dashboard is then available at `http://localhost:8501`.
+**What happens on startup:** Docker Compose brings up infrastructure (RedPanda, Redis, PostgreSQL), then `hydrate-redis` loads client/employee profiles from PostgreSQL into Redis (without pre-loading sequence buffers — the `--skip-buffers` flag is baked into the compose command). Once hydration completes, the streaming pipeline services start consuming. The simulator replays the last 10 days of synthetic transactions so buffers build up organically, which is representative of what a supervisor watching the dashboard would actually see.
 
 ## Key Design Decisions
 
